@@ -44,18 +44,16 @@ export default function Canvas() {
     const iframe = iframeRef.current;
     if (!iframe) return;
 
-    const doc = iframe.contentDocument;
-    if (!doc) return;
-
-    doc.open();
-    doc.write(html || "<html><body></body></html>");
-    doc.close();
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    iframe.src = url;
+    return () => URL.revokeObjectURL(url);
   }, [html, key]);
 
   function openInTab() {
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    window.open(url, "_blank");
+    if (iframeRef.current?.src?.startsWith("blob:")) {
+      window.open(iframeRef.current.src, "_blank");
+    }
   }
 
   if (!html) {
