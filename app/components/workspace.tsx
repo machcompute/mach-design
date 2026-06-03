@@ -2,18 +2,14 @@
 
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import ChatPanel from "./chat-panel";
 
 export default function Workspace() {
   return (
     <Group direction="horizontal" className="flex-1">
       <Panel defaultSize="33%" minSize="20%" maxSize="60%">
-        <div className="h-full flex flex-col border-r border-mc-gray/15">
-          <div className="flex items-center h-12 px-4 border-b border-mc-gray/15">
-            <span className="text-xs font-semibold uppercase tracking-wider text-mc-gray/60">Chat</span>
-          </div>
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-mc-gray font-mono text-sm">chat goes here</p>
-          </div>
+        <div className="h-full flex flex-col border-r border-mc-gray/15 overflow-hidden">
+          <ChatPanel />
         </div>
       </Panel>
 
