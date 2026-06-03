@@ -10,27 +10,30 @@ import {
   useThreadRuntime,
   type ChatModelAdapter,
   type ChatModelRunOptions,
-  type TextContentPart,
+  type TextMessagePart,
+  type ToolCallMessagePart,
   type ThreadMessage,
 } from "@assistant-ui/react";
 import { Eraser } from "lucide-react";
 import { toJSONSchema } from "assistant-stream";
 import { Thread } from "@/components/assistant-ui/thread";
 import { useSettingsStore } from "@/app/store/settings";
+import { useFilesystemStore } from "@/app/store/filesystem";
+import { useCanvasStore } from "@/app/store/canvas";
 
 function toOpenAIMessages(
   messages: readonly ThreadMessage[]
 ): OpenAI.ChatCompletionMessageParam[] {
-  return messages.flatMap((m) => {
+  const result: OpenAI.ChatCompletionMessageParam[] = [];
+  for (const m of messages) {
     const text = m.content
-      .filter((c): c is TextContentPart => c.type === "text")
+      .filter((c): c is TextMessagePart => c.type === "text")
       .map((c) => c.text)
       .join("");
-
-    if (m.role === "user") return [{ role: "user", content: text }];
-    if (m.role === "assistant") return [{ role: "assistant", content: text }];
-    return [];
-  });
+    if (m.role === "user") result.push({ role: "user", content: text });
+    else if (m.role === "assistant") result.push({ role: "assistant", content: text });
+  }
+  return result;
 }
 
 const adapter: ChatModelAdapter = {
@@ -61,6 +64,10 @@ const adapter: ChatModelAdapter = {
       ...toOpenAIMessages(messages),
     ];
 
+    type FnToolCall = OpenAI.ChatCompletionMessageToolCall & { type: "function" };
+    type Part = TextMessagePart | ToolCallMessagePart;
+    const parts: Part[] = [];
+
     while (true) {
       const stream = await client.chat.completions.create(
         {
@@ -72,37 +79,56 @@ const adapter: ChatModelAdapter = {
         { signal: abortSignal }
       );
 
-      let text = "";
-      const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
+      let textPartIdx = -1;
+      const toolCalls: FnToolCall[] = [];
+      const toolCallPartIdx: number[] = [];
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
 
         if (delta?.content) {
-          text += delta.content;
-          yield { content: [{ type: "text", text }] };
+          if (textPartIdx === -1) {
+            textPartIdx = parts.length;
+            parts.push({ type: "text", text: "" });
+          }
+          const prev = parts[textPartIdx] as TextMessagePart;
+          parts[textPartIdx] = { type: "text", text: prev.text + delta.content };
+          yield { content: [...parts] };
         }
 
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
             if (!toolCalls[idx]) {
-              toolCalls[idx] = { id: "", type: "function", function: { name: "", arguments: "" } };
+              toolCalls[idx] = { id: tc.id ?? "", type: "function", function: { name: "", arguments: "" } } as FnToolCall;
+              toolCallPartIdx[idx] = parts.length;
+              parts.push({ type: "tool-call", toolCallId: tc.id ?? "", toolName: "", argsText: "", args: {} });
             }
             if (tc.id) toolCalls[idx].id = tc.id;
             if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
             if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
+
+            parts[toolCallPartIdx[idx]] = {
+              type: "tool-call",
+              toolCallId: toolCalls[idx].id,
+              toolName: toolCalls[idx].function.name,
+              argsText: toolCalls[idx].function.arguments,
+              args: {},
+            };
+            yield { content: [...parts] };
           }
         }
       }
 
       if (toolCalls.length === 0) break;
 
-      history.push({ role: "assistant", content: text || null, tool_calls: toolCalls });
+      history.push({ role: "assistant", content: (parts[textPartIdx] as TextMessagePart | undefined)?.text || null, tool_calls: toolCalls });
 
-      for (const tc of toolCalls) {
+      for (let i = 0; i < toolCalls.length; i++) {
+        const tc = toolCalls[i];
         const toolDef = context.tools?.[tc.function.name];
-        let result = "unknown tool";
+        let result: unknown = "unknown tool";
+        let isError = false;
         if (toolDef?.execute) {
           try {
             const args = JSON.parse(tc.function.arguments || "{}");
@@ -111,12 +137,20 @@ const adapter: ChatModelAdapter = {
               abortSignal,
               human: () => Promise.resolve(null),
             });
-            result = typeof out === "string" ? out : JSON.stringify(out);
+            result = out;
           } catch (e) {
             result = `Error: ${e}`;
+            isError = true;
           }
         }
-        history.push({ role: "tool", tool_call_id: tc.id, content: result });
+        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+        parts[toolCallPartIdx[i]] = {
+          ...(parts[toolCallPartIdx[i]] as ToolCallMessagePart),
+          result,
+          isError,
+        };
+        yield { content: [...parts] };
+        history.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
       }
     }
   },
@@ -139,30 +173,179 @@ You think in components, spacing systems, and visual hierarchy. You are opiniona
 
 ## Tools
 
-You have access to the following tools. Use them when appropriate.
+You have access to the following tools. Use them proactively to read inputs and save outputs.
 
-### \`say_hi\`
+### \`list_files\`
 
-Shows a greeting alert to the user in the browser.
+Lists the contents of a directory in the file system.
 
-- **Parameters:** none
-- **Use when:** the user asks you to say hello or greet them
+- **Parameters:** \`path\` (string, optional) — slash-separated path, e.g. \`"Uploads"\` or \`"Uploads/designs"\`. Defaults to root (\`""\`).
+- **Returns:** JSON array of \`{ kind, name, path, size?, mimeType? }\` where \`kind\` is \`"file"\` or \`"directory"\`
+- **Use when:** exploring the file system, checking what files exist, or before reading a file
+
+### \`read_file\`
+
+Reads the contents of a file by its full path.
+
+- **Parameters:** \`path\` (string) — slash-separated path to the file, e.g. \`"Uploads/design.html"\`
+- **Returns:** file contents as a UTF-8 string, or base64 for binary files
+- **Use when:** the user asks you to use a file as input, or you need to inspect a file
+
+### \`write_file\`
+
+Creates or overwrites a file at a given path.
+
+- **Parameters:** \`path\` (string) — slash-separated path including filename, e.g. \`"Outputs/design.html"\`; \`content\` (string)
+- **Returns:** confirmation with file size
+- **Use when:** saving generated HTML, CSS, or any text output the user should keep
+- **Note:** the \`Uploads\` folder is read-only — save your outputs elsewhere (e.g. \`Outputs/\`)
+
+### \`delete_file\`
+
+Deletes a file or directory at a given path.
+
+- **Parameters:** \`path\` (string) — slash-separated path to the entry, e.g. \`"Outputs/old.html"\`
+- **Returns:** confirmation
+- **Use when:** the user explicitly asks to remove a file
+- **Note:** the \`Uploads\` folder is read-only — files there cannot be deleted
+
+### \`search_and_replace\`
+
+Replaces exactly one occurrence of a string in a file. Fails if the search string appears zero or more than one time.
+
+- **Parameters:** \`path\` (string), \`search\` (string), \`replace\` (string)
+- **Returns:** confirmation, or an error describing why it failed
+- **Use when:** making targeted edits to an existing file without rewriting it entirely
+
+### \`show_file\`
+
+Renders a saved HTML file on the canvas tab so the user can preview it live.
+
+- **Parameters:** \`path\` (string) — slash-separated path to an HTML file, e.g. \`"Outputs/design.html"\`
+- **Returns:** confirmation
+- **Use when:** after writing an HTML file — always show it so the user can see the result
 `;
+
+const listFilesTool = {
+  toolName: "list_files",
+  type: "frontend" as const,
+  description: "Lists the contents of a directory in the file system",
+  parameters: z.object({
+    path: z.string().optional().describe('Slash-separated path, e.g. "Uploads" or "Uploads/designs". Defaults to root.'),
+  }),
+  execute: async ({ path = "" }: { path?: string }) => {
+    const segments = path ? path.split("/").filter(Boolean) : [];
+    const entries = await useFilesystemStore.getState().listPath(segments);
+    const base = path ? `${path}/` : "";
+    return entries.map((e) =>
+      e.kind === "file"
+        ? { kind: "file", name: e.name, path: `${base}${e.name}`, size: e.size, mimeType: e.mimeType }
+        : { kind: "directory", name: e.name, path: `${base}${e.name}` }
+    );
+  },
+};
+
+const readFileTool = {
+  toolName: "read_file",
+  type: "frontend" as const,
+  description: "Reads the contents of a file from the Uploads folder",
+  parameters: z.object({ path: z.string().describe('Slash-separated path to the file, e.g. "Uploads/design.html"') }),
+  execute: async ({ path }: { path: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    const name = segments.pop()!;
+    const file = await useFilesystemStore.getState().readFileAt(segments, name);
+    if (file.type.startsWith("text/") || file.type === "application/json" || file.type === "") {
+      return file.text();
+    }
+    const buf = await file.arrayBuffer();
+    return `data:${file.type};base64,${btoa(String.fromCharCode(...new Uint8Array(buf)))}`;
+  },
+};
+
+const writeFileTool = {
+  toolName: "write_file",
+  type: "frontend" as const,
+  description: "Creates or overwrites a file at a given path",
+  parameters: z.object({
+    path: z.string().describe('Slash-separated path including filename, e.g. "Uploads/design.html"'),
+    content: z.string().describe("File content as a UTF-8 string"),
+  }),
+  execute: async ({ path, content }: { path: string; content: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    if (segments[0] === "Uploads") return "Error: the Uploads folder is read-only. Save files to a different folder.";
+    const name = segments.pop()!;
+    const file = new File([content], name, { type: "text/plain" });
+    await useFilesystemStore.getState().uploadFilesTo(segments, [file]);
+    return `Saved ${path} (${content.length} chars)`;
+  },
+};
+
+const deleteFileTool = {
+  toolName: "delete_file",
+  type: "frontend" as const,
+  description: "Deletes a file or directory at a given path",
+  parameters: z.object({ path: z.string().describe('Slash-separated path to the entry, e.g. "Outputs/old.html"') }),
+  execute: async ({ path }: { path: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    if (segments[0] === "Uploads") return "Error: the Uploads folder is read-only. Cannot delete from it.";
+    const name = segments.pop()!;
+    await useFilesystemStore.getState().deleteAt(segments, name);
+    return `Deleted ${path}`;
+  },
+};
+
+const searchAndReplaceTool = {
+  toolName: "search_and_replace",
+  type: "frontend" as const,
+  description: "Replaces exactly one occurrence of a string in a file",
+  parameters: z.object({
+    path: z.string().describe("Slash-separated path to the file"),
+    search: z.string().describe("Exact string to search for"),
+    replace: z.string().describe("String to substitute in its place"),
+  }),
+  execute: async ({ path, search, replace }: { path: string; search: string; replace: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    const name = segments.pop()!;
+    const store = useFilesystemStore.getState();
+    const file = await store.readFileAt(segments, name);
+    const text = await file.text();
+
+    const count = text.split(search).length - 1;
+    if (count === 0) return `Error: "${search}" not found in ${path}`;
+    if (count > 1) return `Error: "${search}" found ${count} times in ${path} — be more specific`;
+
+    const updated = text.replace(search, replace);
+    const outFile = new File([updated], name, { type: "text/plain" });
+    await store.uploadFilesTo(segments, [outFile]);
+    return `Replaced 1 occurrence in ${path}`;
+  },
+};
+
+const showFileTool = {
+  toolName: "show_file",
+  type: "frontend" as const,
+  description: "Renders a saved HTML file on the canvas tab",
+  parameters: z.object({
+    path: z.string().describe('Slash-separated path to an HTML file, e.g. "Outputs/design.html"'),
+  }),
+  execute: async ({ path }: { path: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    const name = segments.pop()!;
+    const file = await useFilesystemStore.getState().readFileAt(segments, name);
+    const html = await file.text();
+    useCanvasStore.getState().setHtml(html);
+    return `Showing ${path} on canvas`;
+  },
+};
 
 function ChatTools() {
   useAssistantInstructions(SYSTEM_PROMPT);
-
-  useAssistantTool({
-    toolName: "say_hi",
-    type: "frontend",
-    description: "Shows a greeting alert to the user in the browser",
-    parameters: z.object({}),
-    execute: async () => {
-      alert("Hi");
-      return "Alert shown";
-    },
-  });
-
+  useAssistantTool(listFilesTool);
+  useAssistantTool(readFileTool);
+  useAssistantTool(writeFileTool);
+  useAssistantTool(deleteFileTool);
+  useAssistantTool(searchAndReplaceTool);
+  useAssistantTool(showFileTool);
   return null;
 }
 

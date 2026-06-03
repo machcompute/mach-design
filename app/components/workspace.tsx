@@ -3,10 +3,12 @@
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import ChatPanel from "./chat-panel";
+import FileBrowser from "./file-browser";
+import Canvas from "./canvas";
 
 export default function Workspace() {
   return (
-    <Group direction="horizontal" className="flex-1">
+    <Group orientation="horizontal" className="flex-1">
       <Panel defaultSize="33%" minSize="20%" maxSize="60%">
         <div className="h-full flex flex-col border-r border-mc-gray/15 overflow-hidden">
           <ChatPanel />
@@ -34,12 +36,12 @@ export default function Workspace() {
             </TabsList>
           </div>
 
-          <TabsContent value="files" className="flex-1 flex items-center justify-center bg-mc-dark/[0.02] mt-0">
-            <p className="text-mc-gray font-mono text-sm">file browser goes here</p>
+          <TabsContent value="files" className="flex-1 mt-0 overflow-hidden">
+            <FileBrowser />
           </TabsContent>
 
-          <TabsContent value="canvas" className="flex-1 flex items-center justify-center bg-mc-dark/[0.02] mt-0">
-            <p className="text-mc-gray font-mono text-sm">canvas goes here</p>
+          <TabsContent value="canvas" className="flex-1 mt-0 overflow-hidden">
+            <Canvas />
           </TabsContent>
         </Tabs>
       </Panel>

@@ -138,7 +138,7 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
 
               <Select
                 value={draft.model}
-                onValueChange={(value) => setDraft((prev) => ({ ...prev, model: value }))}
+                onValueChange={(value) => setDraft((prev) => ({ ...prev, model: value ?? "" }))}
               >
                 <SelectTrigger className="w-full font-mono text-sm">
                   <SelectValue placeholder="Select a model…" />
