@@ -5,8 +5,11 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import ChatPanel from "./chat-panel";
 import FileBrowser from "./file-browser";
 import Canvas from "./canvas";
+import { useWorkspaceStore } from "@/app/store/workspace";
 
 export default function Workspace() {
+  const { activeTab, setActiveTab } = useWorkspaceStore();
+
   return (
     <Group orientation="horizontal" className="flex-1">
       <Panel defaultSize="33%" minSize="20%" maxSize="60%">
@@ -18,7 +21,7 @@ export default function Workspace() {
       <Separator className="w-1 bg-transparent hover:bg-mc-lavender/40 data-[resize-handle-active=pointer]:bg-mc-lavender/60 transition-colors" />
 
       <Panel defaultSize="67%" minSize="0%" collapsible collapsedSize="0%">
-        <Tabs defaultValue="files" className="h-full flex flex-col">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">
           <div className="flex items-center h-12 border-b border-mc-gray/15 px-2">
             <TabsList variant="line" className="h-full gap-1 rounded-none p-0">
               <TabsTrigger
@@ -36,11 +39,11 @@ export default function Workspace() {
             </TabsList>
           </div>
 
-          <TabsContent value="files" className="flex-1 mt-0 overflow-hidden">
+          <TabsContent value="files" keepMounted className="flex-1 mt-0 overflow-hidden">
             <FileBrowser />
           </TabsContent>
 
-          <TabsContent value="canvas" className="flex-1 mt-0 overflow-hidden">
+          <TabsContent value="canvas" keepMounted className="flex-1 mt-0 overflow-hidden">
             <Canvas />
           </TabsContent>
         </Tabs>
