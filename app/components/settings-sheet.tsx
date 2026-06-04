@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Settings, RefreshCw } from "lucide-react";
+import { Settings, RefreshCw, TriangleAlert, Copy, Check } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -26,6 +26,27 @@ interface SettingsSheetProps {
   onOpenChange: (open: boolean) => void;
 }
 
+function mixedContentInfo(baseUrl: string) {
+  if (typeof window === "undefined") return null;
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:") return null;
+  const host = url.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return null;
+  const port = url.port || "80";
+  return {
+    host,
+    port,
+    localhostUrl: `http://localhost:${port}${url.pathname}`,
+    socatCmd: `socat TCP-LISTEN:${port},reuseaddr,fork TCP:${host}:${port}`,
+    netshCmd: `netsh interface portproxy add v4tov4 listenport=${port} listenaddress=127.0.0.1 connectport=${port} connectaddress=${host}`,
+  };
+}
+
 export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps) {
   const stored = useSettingsStore();
   const [draft, setDraft] = useState({
@@ -36,6 +57,15 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
   const [models, setModels] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  function copy(text: string, key: string) {
+    navigator.clipboard?.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  }
+
+  const mixed = mixedContentInfo(draft.baseUrl);
 
   useEffect(() => {
     if (open) {
@@ -106,6 +136,67 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
               <p className="text-xs text-mc-gray">
                 Base URL of your OpenAI-compatible server. Make sure CORS is enabled.
               </p>
+
+              {mixed && (
+                <div className="mt-1 rounded-md border border-amber-300/60 bg-amber-50 p-3 space-y-2.5">
+                  <div className="flex items-start gap-2">
+                    <TriangleAlert className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-mc-dark leading-relaxed">
+                      An HTTPS page can&apos;t reach a plain-HTTP non-local address — browsers{" "}
+                      <span className="font-medium">block it</span> (mixed content). Relay it through localhost:
+                      run this on the machine with your browser, then use the localhost URL.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 bg-mc-dark rounded px-2 py-1.5">
+                    <code className="flex-1 min-w-0 text-[11px] font-mono text-mc-lime overflow-x-auto whitespace-nowrap">
+                      {mixed.socatCmd}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => copy(mixed.socatCmd, "socat")}
+                      className="shrink-0 text-mc-gray/70 hover:text-white transition-colors"
+                      title="Copy command"
+                    >
+                      {copiedKey === "socat" ? <Check className="w-3.5 h-3.5 text-mc-mint" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+
+                  <div className="text-[11px] text-mc-gray leading-relaxed space-y-1">
+                    <p>
+                      Install socat — <span className="font-medium text-mc-dark">macOS</span>{" "}
+                      <code className="font-mono">brew install socat</code> ·{" "}
+                      <span className="font-medium text-mc-dark">Linux</span>{" "}
+                      <code className="font-mono">apt/dnf/pacman install socat</code>
+                    </p>
+                    <p>
+                      <span className="font-medium text-mc-dark">Windows</span> — run it under WSL (prefix{" "}
+                      <code className="font-mono">wsl</code>), or use netsh as Administrator:
+                    </p>
+                    <div className="flex items-center gap-2 bg-mc-dark rounded px-2 py-1.5">
+                      <code className="flex-1 min-w-0 font-mono text-mc-lime overflow-x-auto whitespace-nowrap">
+                        {mixed.netshCmd}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copy(mixed.netshCmd, "netsh")}
+                        className="shrink-0 text-mc-gray/70 hover:text-white transition-colors"
+                        title="Copy command"
+                      >
+                        {copiedKey === "netsh" ? <Check className="w-3.5 h-3.5 text-mc-mint" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setDraft((prev) => ({ ...prev, baseUrl: mixed.localhostUrl }))}
+                    className="text-xs font-medium text-mc-dark bg-amber-200/60 hover:bg-amber-200 rounded px-2 py-1 transition-colors"
+                  >
+                    Use {mixed.localhostUrl}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
