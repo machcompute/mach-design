@@ -21,6 +21,7 @@ import { useSettingsStore } from "@/app/store/settings";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useWorkspaceStore } from "@/app/store/workspace";
+import { lintTsx } from "@/app/lib/lint-tsx";
 
 function toOpenAIMessages(
   messages: readonly ThreadMessage[]
@@ -166,18 +167,20 @@ You think in components, spacing systems, and visual hierarchy. You are opiniona
 
 ## Output format — read carefully
 
-Every design you produce is a **single self-contained TSX React component** that renders live on the canvas. Strict rules:
+Every design you produce is a **TSX React component** that renders live on the canvas. Strict rules:
 
 - Define one component named **\`App\`** and end the file with \`export default App;\` (or write \`export default function App() { … }\`).
-- **Do NOT write any \`import\` statements.** React and its hooks are already in scope as globals — use \`useState\`, \`useEffect\`, \`useRef\`, \`useMemo\`, \`useCallback\`, \`Fragment\`, etc. directly. No third-party or icon libraries are available.
+- **Write normal \`import\` statements.** Import hooks from React (\`import { useState, useEffect, useRef } from "react";\`) and icons from lucide-react (\`import { Heart, Star } from "lucide-react";\`).
+- **Only these packages are available:** \`react\`, \`react-dom\`, \`lucide-react\`. Importing anything else will fail — do not use other libraries.
 - Style with **Tailwind utility classes** (\`className="…"\`) and/or inline \`style={{ … }}\` objects. Tailwind is loaded in the preview, so utility classes work out of the box.
-- Keep everything in the one component (helper components/functions may be defined in the same file, but only \`App\` is rendered).
+- \`App\` is the rendered component; you may define helper components/functions in the same file.
 - Make it interactive and polished — use state and effects where they improve the design.
+- The canvas type-checks and lint-checks your code (TypeScript + react-hooks); write type-correct code and follow the rules of hooks.
 
 ## Behaviour
 
 - Ask clarifying questions before generating large designs.
-- Save the component with \`write_file\` to a \`.tsx\` path (e.g. \`Outputs/App.tsx\`), then call \`show_file\` to preview it — always show after writing.
+- Save the component with \`write_file\` to a \`.tsx\` path (e.g. \`Outputs/App.tsx\`), then call \`lint_file\` to check it — fix any reported errors and re-lint until clean, then call \`show_file\` to preview it.
 - When iterating, describe what changed and why.
 
 ## Tools
@@ -226,13 +229,21 @@ Replaces exactly one occurrence of a string in a file. Fails if the search strin
 - **Returns:** confirmation, or an error describing why it failed
 - **Use when:** making targeted edits to an existing file without rewriting it entirely
 
+### \`lint_file\`
+
+Type-checks and lint-checks a TSX file (TypeScript + react-hooks rules) and reports every problem.
+
+- **Parameters:** \`path\` (string) — slash-separated path to a \`.tsx\` file, e.g. \`"Outputs/App.tsx"\`
+- **Returns:** a list of \`severity line:col [source] message\`, or "No problems"
+- **Use when:** after writing or editing a component, before showing it — fix all errors and re-lint until clean
+
 ### \`show_file\`
 
 Renders a saved TSX component on the canvas tab so the user can preview it live.
 
 - **Parameters:** \`path\` (string) — slash-separated path to a \`.tsx\` file, e.g. \`"Outputs/App.tsx"\`
 - **Returns:** confirmation
-- **Use when:** after writing a component — always show it so the user can see the result
+- **Use when:** after writing a component and it lints clean — always show it so the user can see the result
 `;
 
 const listFilesTool = {
@@ -330,6 +341,26 @@ const searchAndReplaceTool = {
   },
 };
 
+const lintFileTool = {
+  toolName: "lint_file",
+  type: "frontend" as const,
+  description: "Type-checks and lint-checks a TSX file, reporting all problems",
+  parameters: z.object({
+    path: z.string().describe('Slash-separated path to a .tsx file, e.g. "Outputs/App.tsx"'),
+  }),
+  execute: async ({ path }: { path: string }) => {
+    const segments = path.split("/").filter(Boolean);
+    const name = segments.pop()!;
+    const file = await useFilesystemStore.getState().readFileAt(segments, name);
+    const code = await file.text();
+    const diagnostics = await lintTsx(code);
+    if (diagnostics.length === 0) return `No problems in ${path}`;
+    return diagnostics
+      .map((d) => `${d.severity} ${d.line}:${d.column} [${d.source}] ${d.message}`)
+      .join("\n");
+  },
+};
+
 const showFileTool = {
   toolName: "show_file",
   type: "frontend" as const,
@@ -355,6 +386,7 @@ function ChatTools() {
   useAssistantTool(writeFileTool);
   useAssistantTool(deleteFileTool);
   useAssistantTool(searchAndReplaceTool);
+  useAssistantTool(lintFileTool);
   useAssistantTool(showFileTool);
   return null;
 }

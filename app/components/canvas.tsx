@@ -1,11 +1,15 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Code2, RefreshCw, Trash2, ExternalLink, MousePointer2 } from "lucide-react";
+import {
+  Code2, RefreshCw, Trash2, ExternalLink, MousePointer2,
+  CircleAlert, TriangleAlert, CircleCheck,
+} from "lucide-react";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
 import { instrumentForEditing, applyStyleEdits } from "@/app/lib/instrument-tsx";
+import { lintTsx, type Diagnostic } from "@/app/lib/lint-tsx";
 import CanvasInspector from "./canvas-inspector";
 
 const EDIT_CSS =
@@ -71,6 +75,36 @@ function ErrorOverlay({ message }: { message: string }) {
   );
 }
 
+function ProblemsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
+  return (
+    <div className="border-t border-mc-gray/15 bg-white overflow-auto" style={{ height: "35%" }}>
+      {diagnostics.length === 0 ? (
+        <div className="h-full flex items-center justify-center gap-2 text-mc-gray">
+          <CircleCheck className="w-4 h-4 text-mc-mint" />
+          <span className="text-xs">No problems</span>
+        </div>
+      ) : (
+        <div className="py-1">
+          {diagnostics.map((d, i) => (
+            <div key={i} className="flex items-start gap-2 px-4 py-1.5 hover:bg-mc-dark/[0.03]">
+              {d.severity === "error" ? (
+                <CircleAlert className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0" />
+              ) : (
+                <TriangleAlert className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+              )}
+              <span className="text-xs font-mono text-mc-gray/60 shrink-0 mt-px tabular-nums">
+                {d.line}:{d.column}
+              </span>
+              <span className="text-xs text-mc-dark flex-1 min-w-0">{d.message}</span>
+              <span className="text-[10px] font-mono text-mc-gray/50 shrink-0 mt-px uppercase">{d.source}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Canvas() {
   const { code, path, setCode, clear } = useCanvasStore();
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -81,6 +115,24 @@ export default function Canvas() {
   const [selectedMachId, setSelectedMachId] = useState<number | null>(null);
   const [selectedEl, setSelectedEl] = useState<Element | null>(null);
   const [selectionKey, setSelectionKey] = useState(0);
+  const [showProblems, setShowProblems] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+
+  useEffect(() => {
+    if (!code.trim()) {
+      setDiagnostics([]);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      const result = await lintTsx(code);
+      if (!cancelled) setDiagnostics(result);
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [code]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -214,6 +266,10 @@ export default function Canvas() {
     }
   }
 
+  const errorCount = diagnostics.filter((d) => d.severity === "error").length;
+  const warningCount = diagnostics.length - errorCount;
+  const drawerOpen = showCode || showProblems;
+
   if (!code) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4 text-center px-8 bg-mc-dark/[0.02]">
@@ -241,9 +297,36 @@ export default function Canvas() {
           <MousePointer2 className="w-3.5 h-3.5" />
           Edit
         </ToolbarButton>
-        <ToolbarButton onClick={() => setShowCode((v) => !v)} title="Toggle source" active={showCode}>
+        <ToolbarButton
+          onClick={() => { setShowCode((v) => !v); setShowProblems(false); }}
+          title="Toggle source"
+          active={showCode}
+        >
           <Code2 className="w-3.5 h-3.5" />
           {showCode ? "Hide code" : "Source"}
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => { setShowProblems((v) => !v); setShowCode(false); }}
+          title="Toggle problems"
+          active={showProblems}
+        >
+          {errorCount > 0 ? (
+            <CircleAlert className="w-3.5 h-3.5 text-red-500" />
+          ) : warningCount > 0 ? (
+            <TriangleAlert className="w-3.5 h-3.5 text-amber-500" />
+          ) : (
+            <CircleCheck className="w-3.5 h-3.5 text-mc-mint" />
+          )}
+          Problems
+          {diagnostics.length > 0 && (
+            <span
+              className={`ml-0.5 px-1 rounded text-[10px] font-semibold tabular-nums ${
+                errorCount > 0 ? "bg-red-500/15 text-red-600" : "bg-amber-500/15 text-amber-600"
+              }`}
+            >
+              {diagnostics.length}
+            </span>
+          )}
         </ToolbarButton>
         <ToolbarButton onClick={openInTab} title="Open in new tab">
           <ExternalLink className="w-3.5 h-3.5" />
@@ -260,11 +343,12 @@ export default function Canvas() {
         <iframe
           ref={iframeRef}
           className="w-full border-none bg-white"
-          style={{ flex: showCode ? "1 1 65%" : "1 1 100%" }}
+          style={{ flex: drawerOpen ? "1 1 65%" : "1 1 100%" }}
           sandbox="allow-scripts allow-same-origin"
           title="Canvas"
         />
         {showCode && <CodeDrawer code={code} />}
+        {showProblems && <ProblemsPanel diagnostics={diagnostics} />}
         {error && <ErrorOverlay message={error} />}
 
         {editMode && selectedEl && selectedMachId !== null && iframeRef.current?.contentWindow && (
