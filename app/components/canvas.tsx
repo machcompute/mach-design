@@ -176,6 +176,20 @@ export default function Canvas() {
     let url: string | null = null;
     let cancelled = false;
 
+    function onRuntimeError(ev: Event) {
+      if (cancelled) return;
+      const e = ev as ErrorEvent & { reason?: unknown };
+      const msg = e.message || (e.reason != null ? String(e.reason) : "unknown error");
+      setError(`Runtime error: ${msg}\n\nThis can also happen if a CDN (esm.sh / Tailwind) failed to load.`);
+    }
+    function onLoad() {
+      const win = iframe!.contentWindow;
+      if (!win) return;
+      win.addEventListener("error", onRuntimeError);
+      win.addEventListener("unhandledrejection", onRuntimeError);
+    }
+    iframe.addEventListener("load", onLoad);
+
     (async () => {
       try {
         const src = editMode ? await instrumentForEditing(code) : code;
@@ -198,6 +212,7 @@ export default function Canvas() {
 
     return () => {
       cancelled = true;
+      iframe.removeEventListener("load", onLoad);
       if (url) URL.revokeObjectURL(url);
     };
   }, [code, key, editMode]);

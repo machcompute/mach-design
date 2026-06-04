@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import ChatPanel from "./chat-panel";
@@ -9,16 +10,22 @@ import { useWorkspaceStore } from "@/app/store/workspace";
 
 export default function Workspace() {
   const { activeTab, setActiveTab } = useWorkspaceStore();
+  const [resizing, setResizing] = useState(false);
 
   return (
-    <Group orientation="horizontal" className="flex-1">
+    <Group orientation="horizontal" className={`flex-1 ${resizing ? "[&_iframe]:pointer-events-none" : ""}`}>
       <Panel defaultSize="33%" minSize="20%" maxSize="60%">
         <div className="h-full flex flex-col border-r border-mc-gray/15 overflow-hidden">
           <ChatPanel />
         </div>
       </Panel>
 
-      <Separator className="w-1 bg-transparent hover:bg-mc-lavender/40 data-[resize-handle-active=pointer]:bg-mc-lavender/60 transition-colors" />
+      <Separator
+        onPointerDown={() => setResizing(true)}
+        onPointerUp={() => setResizing(false)}
+        onLostPointerCapture={() => setResizing(false)}
+        className="w-1 bg-transparent hover:bg-mc-lavender/40 active:bg-mc-lavender/60 transition-colors"
+      />
 
       <Panel defaultSize="67%" minSize="0%" collapsible collapsedSize="0%">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col">

@@ -42,6 +42,9 @@ const adapter: ChatModelAdapter = {
   async *run({ messages, abortSignal, context }: ChatModelRunOptions) {
     const { baseUrl, apiKey, model } = useSettingsStore.getState();
 
+    if (!baseUrl) throw new Error("No server URL set. Open Settings and enter your model server's base URL.");
+    if (!model) throw new Error("No model selected. Open Settings, click Refresh, and pick a model.");
+
     const client = new OpenAI({
       baseURL: baseUrl,
       apiKey: apiKey || "none",

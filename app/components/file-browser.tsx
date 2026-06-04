@@ -149,12 +149,21 @@ function EntryRow({
   );
 }
 
+function opfsSupported(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    !!navigator.storage &&
+    typeof navigator.storage.getDirectory === "function"
+  );
+}
+
 export default function FileBrowser() {
   const { init, listPath, uploadFilesTo, deleteAt, readFileAt } = useFilesystemStore();
   const [path, setPath] = useState<string[]>([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(false);
+  const [supported, setSupported] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async (p: string[]) => {
@@ -168,7 +177,18 @@ export default function FileBrowser() {
   }, [listPath]);
 
   useEffect(() => {
-    (async () => { await init(); await refresh([]); })();
+    if (!opfsSupported()) {
+      setSupported(false);
+      return;
+    }
+    (async () => {
+      try {
+        await init();
+        await refresh([]);
+      } catch {
+        setSupported(false);
+      }
+    })();
   }, []);
 
   function navigateTo(idx: number) {
@@ -201,6 +221,20 @@ export default function FileBrowser() {
   }
 
   const selectedFile = selected?.kind === "file" ? selected : null;
+
+  if (!supported) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-3 text-center px-8">
+        <FolderOpen className="w-8 h-8 text-mc-gray/30" />
+        <div>
+          <p className="text-sm font-medium text-mc-dark">File storage unavailable</p>
+          <p className="text-xs text-mc-gray mt-1 max-w-xs">
+            This browser doesn&apos;t support OPFS (the local file system). Try a recent Chrome, Edge, or Safari over HTTPS.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Group orientation="vertical" className="h-full">
@@ -259,7 +293,7 @@ export default function FileBrowser() {
       {selectedFile && (
         <>
           <Separator
-            className="h-1 bg-transparent hover:bg-mc-lavender/40 data-[resize-handle-active=pointer]:bg-mc-lavender/60 transition-colors"
+            className="h-1 bg-transparent hover:bg-mc-lavender/40 active:bg-mc-lavender/60 transition-colors"
           />
           <Panel defaultSize="40%" minSize="15%">
             <FilePreview entry={selectedFile} path={path} />

@@ -46,7 +46,7 @@ let tsEnvPromise: Promise<{ env: TsEnv; ts: TsModule }> | null = null;
 
 async function getTsEnv() {
   if (!tsEnvPromise) {
-    tsEnvPromise = (async () => {
+    const promise = (async () => {
       const ts = ((await import("typescript")) as { default?: TsModule }).default ?? (await import("typescript"));
       const vfs = await import("@typescript/vfs");
 
@@ -65,7 +65,9 @@ async function getTsEnv() {
         noUnusedParameters: true,
       };
 
-      const fsMap = await vfs.createDefaultMapFromCDN(compilerOptions, ts.version, true, ts);
+      // cache=false: avoid writing ~1MB of lib .d.ts into localStorage (quota risk);
+      // the browser HTTP cache still makes refetches fast.
+      const fsMap = await vfs.createDefaultMapFromCDN(compilerOptions, ts.version, false, ts);
       fsMap.set("/globals.d.ts", AMBIENT);
       fsMap.set("/App.tsx", "export {};");
 
@@ -73,13 +75,29 @@ async function getTsEnv() {
       const env = vfs.createVirtualTypeScriptEnvironment(system, ["/App.tsx", "/globals.d.ts"], ts, compilerOptions);
       return { env: env as unknown as TsEnv, ts: ts as TsModule };
     })();
+    // Reset on failure so a transient CDN/network error can be retried on the next lint.
+    promise.catch(() => { tsEnvPromise = null; });
+    tsEnvPromise = promise;
   }
   return tsEnvPromise;
 }
 
+const LINT_UNAVAILABLE: Diagnostic = {
+  severity: "warning",
+  line: 1,
+  column: 1,
+  message: "Type checker unavailable — could not load TypeScript (offline or a CDN is blocked). Type errors won't be reported.",
+  source: "ts",
+};
+
 async function tsDiagnostics(code: string): Promise<Diagnostic[]> {
+  let env: TsEnv, ts: TsModule;
   try {
-    const { env, ts } = await getTsEnv();
+    ({ env, ts } = await getTsEnv());
+  } catch {
+    return [LINT_UNAVAILABLE];
+  }
+  try {
     env.updateFile("/App.tsx", code);
     const raw = [
       ...env.languageService.getSemanticDiagnostics("/App.tsx"),
