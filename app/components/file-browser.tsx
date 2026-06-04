@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Folder, FolderOpen, File, FileText, FileImage, FileCode,
-  Upload, Trash2, ChevronRight, Home, Eye,
+  Upload, Trash2, ChevronRight, Home,
 } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -100,8 +100,8 @@ function FilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
   );
 }
 
-function isHtml(entry: Entry) {
-  return entry.kind === "file" && (entry.mimeType === "text/html" || entry.name.endsWith(".html"));
+function isComponent(entry: Entry) {
+  return entry.kind === "file" && entry.name.endsWith(".tsx");
 }
 
 function EntryRow({
@@ -117,7 +117,12 @@ function EntryRow({
 }) {
   return (
     <div
-      onClick={(e) => { e.stopPropagation(); entry.kind === "directory" ? onOpen() : onSelect(); }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (entry.kind === "directory") onOpen();
+        else if (onPreview) onPreview();
+        else onSelect();
+      }}
       className={`group flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors select-none ${
         selected ? "bg-mc-lavender/10" : "hover:bg-mc-dark/[0.03]"
       }`}
@@ -131,24 +136,15 @@ function EntryRow({
           <p className="text-xs text-mc-gray/60 font-mono">{formatSize(entry.size)}</p>
         )}
       </div>
-      <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
-        {onPreview && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onPreview(); }}
-            className="text-mc-gray hover:text-mc-lavender transition-colors"
-            title="Open in canvas"
-          >
-            <Eye className="w-3.5 h-3.5" />
-          </button>
-        )}
+      {!(entry.kind === "directory" && entry.name === "Uploads" && path.length === 0) && (
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          className="text-mc-gray hover:text-red-500 transition-colors"
+          className="shrink-0 opacity-0 group-hover:opacity-100 text-mc-gray hover:text-red-500 transition-all"
           title="Delete"
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
-      </div>
+      )}
     </div>
   );
 }
@@ -198,6 +194,7 @@ export default function FileBrowser() {
   }
 
   async function handleDelete(entry: Entry) {
+    if (entry.kind === "directory" && entry.name === "Uploads" && path.length === 0) return;
     if (selected?.name === entry.name) setSelected(null);
     await deleteAt(path, entry.name);
     await refresh(path);
@@ -245,9 +242,10 @@ export default function FileBrowser() {
                     onSelect={() => setSelected(selected?.name === entry.name ? null : entry)}
                     onOpen={() => openDir(entry.name)}
                     onDelete={() => handleDelete(entry)}
-                    onPreview={isHtml(entry) ? async () => {
+                    onPreview={isComponent(entry) ? async () => {
                       const file = await readFileAt(path, entry.name);
-                      useCanvasStore.getState().setHtml(await file.text());
+                      const fullPath = [...path, entry.name].join("/");
+                      useCanvasStore.getState().setCode(await file.text(), fullPath);
                       useWorkspaceStore.getState().setActiveTab("canvas");
                     } : undefined}
                   />

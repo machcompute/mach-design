@@ -3,13 +3,28 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Code2, RefreshCw, Trash2, ExternalLink, MousePointer2 } from "lucide-react";
 import { useCanvasStore } from "@/app/store/canvas";
+import { useFilesystemStore } from "@/app/store/filesystem";
+import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
+import { instrumentForEditing, applyStyleEdits } from "@/app/lib/instrument-tsx";
 import CanvasInspector from "./canvas-inspector";
 
-const INSPECTOR_STYLE = `
-  * { cursor: crosshair !important; }
-  *:hover { outline: 2px solid rgba(184,179,233,0.5) !important; outline-offset: 1px; }
-  .__mach_selected__ { outline: 2px solid #B8B3E9 !important; outline-offset: 2px; }
-`;
+const EDIT_CSS =
+  "*{cursor:crosshair !important}" +
+  "[data-mach-id]:hover{outline:2px solid rgba(184,179,233,0.5) !important;outline-offset:1px}";
+
+function camelToKebab(s: string): string {
+  return s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
+}
+
+function upsertStyle(doc: Document, id: string, css: string) {
+  let el = doc.getElementById(id) as HTMLStyleElement | null;
+  if (!el) {
+    el = doc.createElement("style");
+    el.id = id;
+    doc.head.appendChild(el);
+  }
+  el.textContent = css;
+}
 
 function ToolbarButton({
   onClick,
@@ -37,45 +52,82 @@ function ToolbarButton({
   );
 }
 
-function CodeDrawer({ html }: { html: string }) {
+function CodeDrawer({ code }: { code: string }) {
   return (
     <div className="border-t border-mc-gray/15 bg-white overflow-auto" style={{ height: "35%" }}>
       <pre className="p-4 text-xs font-mono text-mc-dark whitespace-pre-wrap break-all leading-relaxed">
-        {html}
+        {code}
       </pre>
     </div>
   );
 }
 
+function ErrorOverlay({ message }: { message: string }) {
+  return (
+    <div className="absolute inset-0 z-50 bg-white/95 overflow-auto p-6">
+      <p className="text-xs font-semibold uppercase tracking-wider text-red-500 mb-3">Compile error</p>
+      <pre className="text-xs font-mono text-red-600 whitespace-pre-wrap leading-relaxed">{message}</pre>
+    </div>
+  );
+}
+
 export default function Canvas() {
-  const { html, setHtml, clear } = useCanvasStore();
+  const { code, path, setCode, clear } = useCanvasStore();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [showCode, setShowCode] = useState(false);
   const [key, setKey] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const [editMode, setEditMode] = useState(false);
+  const [selectedMachId, setSelectedMachId] = useState<number | null>(null);
   const [selectedEl, setSelectedEl] = useState<Element | null>(null);
   const [selectionKey, setSelectionKey] = useState(0);
 
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe) return;
+    if (!iframe || !code) return;
 
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    iframe.src = url;
-    return () => URL.revokeObjectURL(url);
-  }, [html, key]);
+    setSelectedMachId(null);
+    setSelectedEl(null);
 
-  const handleElementClick = useCallback((e: MouseEvent) => {
+    let url: string | null = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const src = editMode ? await instrumentForEditing(code) : code;
+        if (cancelled) return;
+        const result = await transpileTsx(src);
+        if (cancelled) return;
+
+        if ("error" in result) {
+          setError(result.error);
+          return;
+        }
+        setError(null);
+        const blob = new Blob([buildPreviewHtml(result.js)], { type: "text/html" });
+        url = URL.createObjectURL(blob);
+        iframe.src = url;
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [code, key, editMode]);
+
+  const handleClick = useCallback((e: MouseEvent) => {
     e.preventDefault();
-    const target = e.target as Element;
-    if (!target || target.tagName === "HTML") return;
-
+    const target = (e.target as Element)?.closest?.("[data-mach-id]") as HTMLElement | null;
     const doc = iframeRef.current?.contentDocument;
-    if (!doc) return;
+    if (!target || !doc) return;
 
-    doc.querySelectorAll(".__mach_selected__").forEach((el) => el.classList.remove("__mach_selected__"));
-    target.classList.add("__mach_selected__");
+    const id = Number(target.getAttribute("data-mach-id"));
+    upsertStyle(doc, "__mach_select__", `[data-mach-id="${id}"]{outline:2px solid #B8B3E9 !important;outline-offset:2px}`);
+    upsertStyle(doc, "__mach_preview__", "");
+    setSelectedMachId(id);
     setSelectedEl(target);
     setSelectionKey((k) => k + 1);
   }, []);
@@ -88,16 +140,14 @@ export default function Canvas() {
       const doc = iframe!.contentDocument;
       if (!doc?.head) return;
 
-      doc.getElementById("__mach_inspector_style__")?.remove();
-      doc.removeEventListener("click", handleElementClick);
+      ["__mach_edit__", "__mach_select__", "__mach_preview__"].forEach((id) =>
+        doc.getElementById(id)?.remove()
+      );
+      doc.removeEventListener("click", handleClick);
 
       if (!editMode) return;
-
-      const style = doc.createElement("style");
-      style.id = "__mach_inspector_style__";
-      style.textContent = INSPECTOR_STYLE;
-      doc.head.appendChild(style);
-      doc.addEventListener("click", handleElementClick);
+      upsertStyle(doc, "__mach_edit__", EDIT_CSS);
+      doc.addEventListener("click", handleClick);
     }
 
     inject();
@@ -107,37 +157,54 @@ export default function Canvas() {
       iframe.removeEventListener("load", inject);
       const doc = iframe.contentDocument;
       if (doc) {
-        doc.getElementById("__mach_inspector_style__")?.remove();
-        doc.querySelectorAll(".__mach_selected__").forEach((el) => el.classList.remove("__mach_selected__"));
-        doc.removeEventListener("click", handleElementClick);
+        ["__mach_edit__", "__mach_select__", "__mach_preview__"].forEach((id) =>
+          doc.getElementById(id)?.remove()
+        );
+        doc.removeEventListener("click", handleClick);
       }
     };
-  }, [editMode, handleElementClick]);
+  }, [editMode, handleClick]);
 
   function toggleEditMode() {
-    if (editMode) {
-      setSelectedEl(null);
-    }
+    setSelectedMachId(null);
+    setSelectedEl(null);
     setEditMode((v) => !v);
+  }
+
+  function handlePreview(styles: Record<string, string>) {
+    const doc = iframeRef.current?.contentDocument;
+    if (!doc || selectedMachId === null) return;
+    const body = Object.entries(styles)
+      .map(([k, v]) => `${camelToKebab(k)}:${v} !important`)
+      .join(";");
+    upsertStyle(doc, "__mach_preview__", `[data-mach-id="${selectedMachId}"]{${body}}`);
+  }
+
+  async function handleSave(styles: Record<string, string>) {
+    if (selectedMachId === null) return;
+    const newCode = await applyStyleEdits(code, selectedMachId, styles);
+    setCode(newCode, path);
+
+    if (path) {
+      const segments = path.split("/").filter(Boolean);
+      const name = segments.pop();
+      if (name) {
+        const file = new File([newCode], name, { type: "text/plain" });
+        await useFilesystemStore.getState().uploadFilesTo(segments, [file]);
+      }
+    }
+
+    setSelectedMachId(null);
+    setSelectedEl(null);
   }
 
   function handleDeselect() {
     const doc = iframeRef.current?.contentDocument;
-    doc?.querySelector(".__mach_selected__")?.classList.remove("__mach_selected__");
-    setSelectedEl(null);
-  }
-
-  function handleSave() {
-    const iframe = iframeRef.current;
-    const doc = iframe?.contentDocument;
-    if (!doc) return;
-
-    doc.querySelectorAll(".__mach_selected__").forEach((el) => el.classList.remove("__mach_selected__"));
-    doc.getElementById("__mach_inspector_style__")?.remove();
-
-    const serialized = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
-    setHtml(serialized);
-    setEditMode(false);
+    if (doc) {
+      doc.getElementById("__mach_select__")?.remove();
+      doc.getElementById("__mach_preview__")?.remove();
+    }
+    setSelectedMachId(null);
     setSelectedEl(null);
   }
 
@@ -147,7 +214,7 @@ export default function Canvas() {
     }
   }
 
-  if (!html) {
+  if (!code) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4 text-center px-8 bg-mc-dark/[0.02]">
         <div className="w-12 h-12 rounded-xl bg-mc-lavender/20 flex items-center justify-center">
@@ -156,7 +223,7 @@ export default function Canvas() {
         <div>
           <p className="text-sm font-medium text-mc-dark">Canvas is empty</p>
           <p className="text-xs text-mc-gray mt-1 max-w-xs">
-            Ask the AI to design something — it will render here automatically.
+            Ask the AI to design a component — it will render here automatically.
           </p>
         </div>
       </div>
@@ -174,7 +241,7 @@ export default function Canvas() {
           <MousePointer2 className="w-3.5 h-3.5" />
           Edit
         </ToolbarButton>
-        <ToolbarButton onClick={() => setShowCode((v) => !v)} title="Toggle source">
+        <ToolbarButton onClick={() => setShowCode((v) => !v)} title="Toggle source" active={showCode}>
           <Code2 className="w-3.5 h-3.5" />
           {showCode ? "Hide code" : "Source"}
         </ToolbarButton>
@@ -197,13 +264,15 @@ export default function Canvas() {
           sandbox="allow-scripts allow-same-origin"
           title="Canvas"
         />
-        {showCode && <CodeDrawer html={html} />}
+        {showCode && <CodeDrawer code={code} />}
+        {error && <ErrorOverlay message={error} />}
 
-        {editMode && selectedEl && iframeRef.current?.contentWindow && (
+        {editMode && selectedEl && selectedMachId !== null && iframeRef.current?.contentWindow && (
           <CanvasInspector
             key={selectionKey}
             el={selectedEl}
             contentWindow={iframeRef.current.contentWindow}
+            onPreview={handlePreview}
             onSave={handleSave}
             onClose={handleDeselect}
           />

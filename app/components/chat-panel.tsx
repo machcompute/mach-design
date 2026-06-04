@@ -20,6 +20,7 @@ import { Thread } from "@/components/assistant-ui/thread";
 import { useSettingsStore } from "@/app/store/settings";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
+import { useWorkspaceStore } from "@/app/store/workspace";
 
 function toOpenAIMessages(
   messages: readonly ThreadMessage[]
@@ -159,16 +160,24 @@ const adapter: ChatModelAdapter = {
 const SYSTEM_PROMPT = `\
 # Mach Design — AI Designer
 
-You are an expert UI/UX designer and front-end engineer embedded in Mach Design, an agentic design tool. Your role is to help users design and build web interfaces by generating clean HTML and CSS, iterating on layouts, and refining visual details.
+You are an expert UI/UX designer and React engineer embedded in Mach Design, an agentic design tool. Your role is to help users design and build interfaces by writing real **React components in TSX**, iterating on layouts, and refining visual details.
 
-You think in components, spacing systems, and visual hierarchy. You are opinionated but explain your reasoning. You prefer minimal, well-structured markup over bloated frameworks.
+You think in components, spacing systems, and visual hierarchy. You are opinionated but explain your reasoning.
+
+## Output format — read carefully
+
+Every design you produce is a **single self-contained TSX React component** that renders live on the canvas. Strict rules:
+
+- Define one component named **\`App\`** and end the file with \`export default App;\` (or write \`export default function App() { … }\`).
+- **Do NOT write any \`import\` statements.** React and its hooks are already in scope as globals — use \`useState\`, \`useEffect\`, \`useRef\`, \`useMemo\`, \`useCallback\`, \`Fragment\`, etc. directly. No third-party or icon libraries are available.
+- Style with **Tailwind utility classes** (\`className="…"\`) and/or inline \`style={{ … }}\` objects. Tailwind is loaded in the preview, so utility classes work out of the box.
+- Keep everything in the one component (helper components/functions may be defined in the same file, but only \`App\` is rendered).
+- Make it interactive and polished — use state and effects where they improve the design.
 
 ## Behaviour
 
 - Ask clarifying questions before generating large designs.
-- When producing code, output complete, self-contained HTML/CSS snippets.
-- Prefer semantic HTML elements.
-- Use CSS custom properties for design tokens (colors, spacing, typography).
+- Save the component with \`write_file\` to a \`.tsx\` path (e.g. \`Outputs/App.tsx\`), then call \`show_file\` to preview it — always show after writing.
 - When iterating, describe what changed and why.
 
 ## Tools
@@ -187,7 +196,7 @@ Lists the contents of a directory in the file system.
 
 Reads the contents of a file by its full path.
 
-- **Parameters:** \`path\` (string) — slash-separated path to the file, e.g. \`"Uploads/design.html"\`
+- **Parameters:** \`path\` (string) — slash-separated path to the file, e.g. \`"Outputs/App.tsx"\`
 - **Returns:** file contents as a UTF-8 string, or base64 for binary files
 - **Use when:** the user asks you to use a file as input, or you need to inspect a file
 
@@ -195,16 +204,16 @@ Reads the contents of a file by its full path.
 
 Creates or overwrites a file at a given path.
 
-- **Parameters:** \`path\` (string) — slash-separated path including filename, e.g. \`"Outputs/design.html"\`; \`content\` (string)
+- **Parameters:** \`path\` (string) — slash-separated path including filename, e.g. \`"Outputs/App.tsx"\`; \`content\` (string)
 - **Returns:** confirmation with file size
-- **Use when:** saving generated HTML, CSS, or any text output the user should keep
+- **Use when:** saving a generated TSX component or any text output the user should keep
 - **Note:** the \`Uploads\` folder is read-only — save your outputs elsewhere (e.g. \`Outputs/\`)
 
 ### \`delete_file\`
 
 Deletes a file or directory at a given path.
 
-- **Parameters:** \`path\` (string) — slash-separated path to the entry, e.g. \`"Outputs/old.html"\`
+- **Parameters:** \`path\` (string) — slash-separated path to the entry, e.g. \`"Outputs/old.tsx"\`
 - **Returns:** confirmation
 - **Use when:** the user explicitly asks to remove a file
 - **Note:** the \`Uploads\` folder is read-only — files there cannot be deleted
@@ -219,11 +228,11 @@ Replaces exactly one occurrence of a string in a file. Fails if the search strin
 
 ### \`show_file\`
 
-Renders a saved HTML file on the canvas tab so the user can preview it live.
+Renders a saved TSX component on the canvas tab so the user can preview it live.
 
-- **Parameters:** \`path\` (string) — slash-separated path to an HTML file, e.g. \`"Outputs/design.html"\`
+- **Parameters:** \`path\` (string) — slash-separated path to a \`.tsx\` file, e.g. \`"Outputs/App.tsx"\`
 - **Returns:** confirmation
-- **Use when:** after writing an HTML file — always show it so the user can see the result
+- **Use when:** after writing a component — always show it so the user can see the result
 `;
 
 const listFilesTool = {
@@ -249,7 +258,7 @@ const readFileTool = {
   toolName: "read_file",
   type: "frontend" as const,
   description: "Reads the contents of a file from the Uploads folder",
-  parameters: z.object({ path: z.string().describe('Slash-separated path to the file, e.g. "Uploads/design.html"') }),
+  parameters: z.object({ path: z.string().describe('Slash-separated path to the file, e.g. "Outputs/App.tsx"') }),
   execute: async ({ path }: { path: string }) => {
     const segments = path.split("/").filter(Boolean);
     const name = segments.pop()!;
@@ -267,7 +276,7 @@ const writeFileTool = {
   type: "frontend" as const,
   description: "Creates or overwrites a file at a given path",
   parameters: z.object({
-    path: z.string().describe('Slash-separated path including filename, e.g. "Uploads/design.html"'),
+    path: z.string().describe('Slash-separated path including filename, e.g. "Outputs/App.tsx"'),
     content: z.string().describe("File content as a UTF-8 string"),
   }),
   execute: async ({ path, content }: { path: string; content: string }) => {
@@ -284,7 +293,7 @@ const deleteFileTool = {
   toolName: "delete_file",
   type: "frontend" as const,
   description: "Deletes a file or directory at a given path",
-  parameters: z.object({ path: z.string().describe('Slash-separated path to the entry, e.g. "Outputs/old.html"') }),
+  parameters: z.object({ path: z.string().describe('Slash-separated path to the entry, e.g. "Outputs/old.tsx"') }),
   execute: async ({ path }: { path: string }) => {
     const segments = path.split("/").filter(Boolean);
     if (segments[0] === "Uploads") return "Error: the Uploads folder is read-only. Cannot delete from it.";
@@ -324,16 +333,17 @@ const searchAndReplaceTool = {
 const showFileTool = {
   toolName: "show_file",
   type: "frontend" as const,
-  description: "Renders a saved HTML file on the canvas tab",
+  description: "Renders a saved TSX component on the canvas tab",
   parameters: z.object({
-    path: z.string().describe('Slash-separated path to an HTML file, e.g. "Outputs/design.html"'),
+    path: z.string().describe('Slash-separated path to a .tsx file, e.g. "Outputs/App.tsx"'),
   }),
   execute: async ({ path }: { path: string }) => {
     const segments = path.split("/").filter(Boolean);
     const name = segments.pop()!;
     const file = await useFilesystemStore.getState().readFileAt(segments, name);
-    const html = await file.text();
-    useCanvasStore.getState().setHtml(html);
+    const code = await file.text();
+    useCanvasStore.getState().setCode(code, path);
+    useWorkspaceStore.getState().setActiveTab("canvas");
     return `Showing ${path} on canvas`;
   },
 };

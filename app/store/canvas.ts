@@ -1,13 +1,15 @@
 import { create } from "zustand";
 
 interface CanvasState {
-  html: string;
-  setHtml: (html: string) => void;
+  code: string;
+  path: string | null;
+  setCode: (code: string, path?: string | null) => void;
   clear: () => void;
 }
 
 export const useCanvasStore = create<CanvasState>()((set) => ({
-  html: "",
-  setHtml: (html) => set({ html }),
-  clear: () => set({ html: "" }),
+  code: "",
+  path: null,
+  setCode: (code, path) => set((s) => ({ code, path: path !== undefined ? path : s.path })),
+  clear: () => set({ code: "", path: null }),
 }));

@@ -2,6 +2,58 @@
 
 import { useState } from "react";
 import { X } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+type Control = "color" | "text" | "select" | "range";
+
+interface PropDescriptor {
+  jsxKey: string;
+  label: string;
+  control: Control;
+  options?: { value: string; label: string }[];
+}
+
+const PROPERTIES: PropDescriptor[] = [
+  { jsxKey: "backgroundColor", label: "Background", control: "color" },
+  { jsxKey: "color", label: "Text color", control: "color" },
+  { jsxKey: "fontSize", label: "Font size", control: "text" },
+  {
+    jsxKey: "fontWeight",
+    label: "Font weight",
+    control: "select",
+    options: [
+      { value: "300", label: "Light" },
+      { value: "400", label: "Normal" },
+      { value: "500", label: "Medium" },
+      { value: "600", label: "Semibold" },
+      { value: "700", label: "Bold" },
+      { value: "800", label: "Extrabold" },
+    ],
+  },
+  {
+    jsxKey: "textAlign",
+    label: "Text align",
+    control: "select",
+    options: [
+      { value: "left", label: "Left" },
+      { value: "center", label: "Center" },
+      { value: "right", label: "Right" },
+      { value: "justify", label: "Justify" },
+    ],
+  },
+  { jsxKey: "padding", label: "Padding", control: "text" },
+  { jsxKey: "margin", label: "Margin", control: "text" },
+  { jsxKey: "gap", label: "Gap", control: "text" },
+  { jsxKey: "width", label: "Width", control: "text" },
+  { jsxKey: "borderRadius", label: "Border radius", control: "text" },
+  { jsxKey: "opacity", label: "Opacity", control: "range" },
+];
 
 function rgbToHex(rgb: string): string {
   if (!rgb || rgb === "transparent") return "#000000";
@@ -15,11 +67,7 @@ function getPath(el: Element): string {
   let cur: Element | null = el;
   while (cur && cur.tagName !== "HTML") {
     const tag = cur.tagName.toLowerCase();
-    const cls = Array.from(cur.classList)
-      .filter((c) => c !== "__mach_selected__")
-      .slice(0, 2)
-      .map((c) => `.${c}`)
-      .join("");
+    const cls = Array.from(cur.classList).slice(0, 2).map((c) => `.${c}`).join("");
     parts.unshift(tag + cls);
     cur = cur.parentElement;
     if (parts.length >= 4) { parts.unshift("…"); break; }
@@ -27,110 +75,121 @@ function getPath(el: Element): string {
   return parts.join(" > ");
 }
 
-function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-mc-gray w-24 shrink-0">{label}</span>
-      <input
-        type="color"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-6 h-6 rounded cursor-pointer border border-mc-gray/20 p-0"
-      />
-      <span className="text-xs font-mono text-mc-gray/60">{value}</span>
-    </div>
-  );
-}
-
-function TextField({
-  label, value, onChange, placeholder,
-}: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-mc-gray w-24 shrink-0">{label}</span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="flex-1 min-w-0 text-xs font-mono bg-mc-dark/[0.03] border border-mc-gray/15 rounded px-2 py-1 text-mc-dark outline-none focus:border-mc-lavender/50"
-      />
-    </div>
-  );
+function initialValue(desc: PropDescriptor, cs: CSSStyleDeclaration): string {
+  const raw = (cs as unknown as Record<string, string>)[desc.jsxKey] ?? "";
+  if (desc.control === "color") return rgbToHex(raw);
+  return raw;
 }
 
 interface Props {
   el: Element;
   contentWindow: Window;
-  onSave: () => void;
+  onPreview: (styles: Record<string, string>) => void;
+  onSave: (styles: Record<string, string>) => void;
   onClose: () => void;
 }
 
-export default function CanvasInspector({ el, contentWindow, onSave, onClose }: Props) {
-  const htmlEl = el as HTMLElement;
-  const cs = contentWindow.getComputedStyle(htmlEl);
+export default function CanvasInspector({ el, contentWindow, onPreview, onSave, onClose }: Props) {
+  const cs = contentWindow.getComputedStyle(el as HTMLElement);
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const v: Record<string, string> = {};
+    for (const desc of PROPERTIES) v[desc.jsxKey] = initialValue(desc, cs);
+    return v;
+  });
+  const [dirty, setDirty] = useState<Set<string>>(() => new Set());
 
-  const [bgColor, setBgColor] = useState(() => rgbToHex(cs.backgroundColor));
-  const [textColor, setTextColor] = useState(() => rgbToHex(cs.color));
-  const [fontSize, setFontSize] = useState(() => htmlEl.style.fontSize || cs.fontSize || "");
-  const [padding, setPadding] = useState(() => htmlEl.style.padding || cs.padding || "");
-  const [borderRadius, setBorderRadius] = useState(() => htmlEl.style.borderRadius || cs.borderRadius || "");
-  const opacityVal = parseFloat(cs.opacity);
-  const [opacity, setOpacity] = useState(() => Number.isNaN(opacityVal) ? 1 : opacityVal);
-
-  function apply(prop: string, value: string) {
-    (htmlEl.style as unknown as Record<string, string>)[prop] = value;
+  function change(key: string, value: string) {
+    const nextValues = { ...values, [key]: value };
+    const nextDirty = new Set(dirty).add(key);
+    setValues(nextValues);
+    setDirty(nextDirty);
+    const styles: Record<string, string> = {};
+    for (const k of nextDirty) styles[k] = nextValues[k];
+    onPreview(styles);
   }
 
-  function handleBgColor(v: string) { setBgColor(v); apply("backgroundColor", v); }
-  function handleTextColor(v: string) { setTextColor(v); apply("color", v); }
-  function handleFontSize(v: string) { setFontSize(v); apply("fontSize", v); }
-  function handlePadding(v: string) { setPadding(v); apply("padding", v); }
-  function handleBorderRadius(v: string) { setBorderRadius(v); apply("borderRadius", v); }
-  function handleOpacity(v: number) { setOpacity(v); apply("opacity", String(v)); }
+  function handleSave() {
+    const styles: Record<string, string> = {};
+    for (const k of dirty) styles[k] = values[k];
+    onSave(styles);
+  }
 
   const tag = el.tagName.toLowerCase();
-  const path = getPath(el);
 
   return (
     <div className="absolute top-4 right-4 z-50 w-64 bg-white border border-mc-gray/20 rounded-lg shadow-xl overflow-hidden">
       <div className="flex items-start justify-between gap-2 px-3 py-2 border-b border-mc-gray/15 bg-mc-dark/[0.02]">
         <div className="min-w-0">
           <span className="text-xs font-mono font-semibold text-mc-dark">{`<${tag}>`}</span>
-          <p className="text-[10px] text-mc-gray/60 truncate mt-0.5 font-mono">{path}</p>
+          <p className="text-[10px] text-mc-gray/60 truncate mt-0.5 font-mono">{getPath(el)}</p>
         </div>
         <button onClick={onClose} className="shrink-0 text-mc-gray hover:text-mc-dark transition-colors mt-0.5">
           <X className="w-3.5 h-3.5" />
         </button>
       </div>
 
-      <div className="px-3 py-3 flex flex-col gap-2.5">
-        <ColorField label="Background" value={bgColor} onChange={handleBgColor} />
-        <ColorField label="Text color" value={textColor} onChange={handleTextColor} />
-        <TextField label="Font size" value={fontSize} onChange={handleFontSize} placeholder="16px" />
-        <TextField label="Padding" value={padding} onChange={handlePadding} placeholder="16px 24px" />
-        <TextField label="Border radius" value={borderRadius} onChange={handleBorderRadius} placeholder="8px" />
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-mc-gray w-24 shrink-0">Opacity</span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={opacity}
-            onChange={(e) => handleOpacity(parseFloat(e.target.value))}
-            className="flex-1 accent-mc-lavender"
-          />
-          <span className="text-xs font-mono text-mc-gray/60 w-7 text-right shrink-0">{opacity.toFixed(2)}</span>
-        </div>
+      <div className="px-3 py-3 flex flex-col gap-2.5 max-h-[60vh] overflow-y-auto">
+        {PROPERTIES.map((desc) => (
+          <div key={desc.jsxKey} className="flex items-center gap-2">
+            <span className="text-xs text-mc-gray w-24 shrink-0">{desc.label}</span>
+            {desc.control === "color" && (
+              <>
+                <input
+                  type="color"
+                  value={values[desc.jsxKey] || "#000000"}
+                  onChange={(e) => change(desc.jsxKey, e.target.value)}
+                  className="w-6 h-6 rounded cursor-pointer border border-mc-gray/20 p-0"
+                />
+                <span className="text-xs font-mono text-mc-gray/60">{values[desc.jsxKey]}</span>
+              </>
+            )}
+            {desc.control === "text" && (
+              <input
+                type="text"
+                value={values[desc.jsxKey]}
+                onChange={(e) => change(desc.jsxKey, e.target.value)}
+                className="flex-1 min-w-0 text-xs font-mono bg-mc-dark/[0.03] border border-mc-gray/15 rounded px-2 py-1 text-mc-dark outline-none focus:border-mc-lavender/50"
+              />
+            )}
+            {desc.control === "select" && (
+              <Select value={values[desc.jsxKey]} onValueChange={(v) => change(desc.jsxKey, v ?? "")}>
+                <SelectTrigger className="flex-1 min-w-0 text-xs h-7">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {desc.options!.map((o) => (
+                    <SelectItem key={o.value} value={o.value} className="text-xs">
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {desc.control === "range" && (
+              <>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={parseFloat(values[desc.jsxKey]) || 0}
+                  onChange={(e) => change(desc.jsxKey, e.target.value)}
+                  className="flex-1 accent-mc-lavender"
+                />
+                <span className="text-xs font-mono text-mc-gray/60 w-7 text-right shrink-0">
+                  {(parseFloat(values[desc.jsxKey]) || 0).toFixed(2)}
+                </span>
+              </>
+            )}
+          </div>
+        ))}
       </div>
 
       <div className="px-3 py-2 border-t border-mc-gray/15 flex justify-end">
         <button
-          onClick={onSave}
-          className="text-xs font-semibold bg-mc-lavender/20 hover:bg-mc-lavender/30 text-mc-dark px-3 py-1.5 rounded transition-colors"
+          onClick={handleSave}
+          disabled={dirty.size === 0}
+          className="text-xs font-semibold bg-mc-lavender/20 hover:bg-mc-lavender/30 disabled:opacity-40 disabled:hover:bg-mc-lavender/20 text-mc-dark px-3 py-1.5 rounded transition-colors"
         >
           Save
         </button>
