@@ -39,10 +39,12 @@ async function getDirAt(path: string[]): Promise<FileSystemDirectoryHandle> {
   return dir;
 }
 
+type DirIterable = { entries(): AsyncIterable<[string, FileSystemHandle]> };
+
 async function listDir(path: string[]): Promise<Entry[]> {
   const dir = await getDirAt(path);
   const entries: Entry[] = [];
-  for await (const [, handle] of dir.entries()) {
+  for await (const [, handle] of (dir as unknown as DirIterable).entries()) {
     if (handle.kind === "file") {
       const file = await (handle as FileSystemFileHandle).getFile();
       entries.push({ kind: "file", name: handle.name, size: file.size, lastModified: file.lastModified, mimeType: file.type });
