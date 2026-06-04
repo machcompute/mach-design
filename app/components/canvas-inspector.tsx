@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { X } from "lucide-react";
+import { X, Trash2 } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { NodeInfo, NodeEdits } from "@/app/lib/instrument-tsx";
 
 type Control = "color" | "text" | "select" | "range";
 
@@ -55,11 +56,23 @@ const PROPERTIES: PropDescriptor[] = [
   { jsxKey: "opacity", label: "Opacity", control: "range" },
 ];
 
-function rgbToHex(rgb: string): string {
-  if (!rgb || rgb === "transparent") return "#000000";
-  const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-  if (!m) return rgb.startsWith("#") ? rgb : "#000000";
-  return "#" + [m[1], m[2], m[3]].map((n) => parseInt(n).toString(16).padStart(2, "0")).join("");
+function colorToHex(color: string, win: Window): string {
+  if (!color || color === "transparent") return "#000000";
+  try {
+    const canvas = win.document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, 1, 1);
+      const d = ctx.getImageData(0, 0, 1, 1).data;
+      return "#" + [d[0], d[1], d[2]].map((n) => n.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // ignore — fall through
+  }
+  return "#000000";
 }
 
 function getPath(el: Element): string {
@@ -75,52 +88,67 @@ function getPath(el: Element): string {
   return parts.join(" > ");
 }
 
-function initialValue(desc: PropDescriptor, cs: CSSStyleDeclaration): string {
+function initialValue(desc: PropDescriptor, cs: CSSStyleDeclaration, win: Window): string {
   const raw = (cs as unknown as Record<string, string>)[desc.jsxKey] ?? "";
-  if (desc.control === "color") return rgbToHex(raw);
+  if (desc.control === "color") return colorToHex(raw, win);
   return raw;
 }
 
 interface Props {
   el: Element;
+  node: NodeInfo;
   contentWindow: Window;
   onPreview: (styles: Record<string, string>) => void;
-  onSave: (styles: Record<string, string>) => void;
+  onSave: (edits: NodeEdits) => void;
+  onDelete: () => void;
   onClose: () => void;
 }
 
-export default function CanvasInspector({ el, contentWindow, onPreview, onSave, onClose }: Props) {
+export default function CanvasInspector({ el, node, contentWindow, onPreview, onSave, onDelete, onClose }: Props) {
   const cs = contentWindow.getComputedStyle(el as HTMLElement);
   const [values, setValues] = useState<Record<string, string>>(() => {
     const v: Record<string, string> = {};
-    for (const desc of PROPERTIES) v[desc.jsxKey] = initialValue(desc, cs);
+    for (const desc of PROPERTIES) v[desc.jsxKey] = initialValue(desc, cs, contentWindow);
     return v;
   });
-  const [dirty, setDirty] = useState<Set<string>>(() => new Set());
+  const [text, setText] = useState(node.text);
+  const [dirtyStyles, setDirtyStyles] = useState<Set<string>>(() => new Set());
+  const [textDirty, setTextDirty] = useState(false);
 
-  function change(key: string, value: string) {
+  function changeStyle(key: string, value: string) {
     const nextValues = { ...values, [key]: value };
-    const nextDirty = new Set(dirty).add(key);
+    const nextDirty = new Set(dirtyStyles).add(key);
     setValues(nextValues);
-    setDirty(nextDirty);
+    setDirtyStyles(nextDirty);
     const styles: Record<string, string> = {};
     for (const k of nextDirty) styles[k] = nextValues[k];
     onPreview(styles);
   }
 
-  function handleSave() {
-    const styles: Record<string, string> = {};
-    for (const k of dirty) styles[k] = values[k];
-    onSave(styles);
+  function changeText(value: string) {
+    setText(value);
+    setTextDirty(true);
+    el.textContent = value;
   }
 
-  const tag = el.tagName.toLowerCase();
+  function handleSave() {
+    const edits: NodeEdits = {};
+    if (dirtyStyles.size > 0) {
+      const styles: Record<string, string> = {};
+      for (const k of dirtyStyles) styles[k] = values[k];
+      edits.styles = styles;
+    }
+    if (textDirty) edits.text = text;
+    onSave(edits);
+  }
+
+  const dirty = dirtyStyles.size > 0 || textDirty;
 
   return (
     <div className="absolute top-4 right-4 z-50 w-64 bg-white border border-mc-gray/20 rounded-lg shadow-xl overflow-hidden">
       <div className="flex items-start justify-between gap-2 px-3 py-2 border-b border-mc-gray/15 bg-mc-dark/[0.02]">
         <div className="min-w-0">
-          <span className="text-xs font-mono font-semibold text-mc-dark">{`<${tag}>`}</span>
+          <span className="text-xs font-mono font-semibold text-mc-dark">{`<${node.tag}>`}</span>
           <p className="text-[10px] text-mc-gray/60 truncate mt-0.5 font-mono">{getPath(el)}</p>
         </div>
         <button onClick={onClose} className="shrink-0 text-mc-gray hover:text-mc-dark transition-colors mt-0.5">
@@ -137,7 +165,7 @@ export default function CanvasInspector({ el, contentWindow, onPreview, onSave, 
                 <input
                   type="color"
                   value={values[desc.jsxKey] || "#000000"}
-                  onChange={(e) => change(desc.jsxKey, e.target.value)}
+                  onChange={(e) => changeStyle(desc.jsxKey, e.target.value)}
                   className="w-6 h-6 rounded cursor-pointer border border-mc-gray/20 p-0"
                 />
                 <span className="text-xs font-mono text-mc-gray/60">{values[desc.jsxKey]}</span>
@@ -147,12 +175,12 @@ export default function CanvasInspector({ el, contentWindow, onPreview, onSave, 
               <input
                 type="text"
                 value={values[desc.jsxKey]}
-                onChange={(e) => change(desc.jsxKey, e.target.value)}
+                onChange={(e) => changeStyle(desc.jsxKey, e.target.value)}
                 className="flex-1 min-w-0 text-xs font-mono bg-mc-dark/[0.03] border border-mc-gray/15 rounded px-2 py-1 text-mc-dark outline-none focus:border-mc-lavender/50"
               />
             )}
             {desc.control === "select" && (
-              <Select value={values[desc.jsxKey]} onValueChange={(v) => change(desc.jsxKey, v ?? "")}>
+              <Select value={values[desc.jsxKey]} onValueChange={(v) => changeStyle(desc.jsxKey, v ?? "")}>
                 <SelectTrigger className="flex-1 min-w-0 text-xs h-7">
                   <SelectValue />
                 </SelectTrigger>
@@ -173,7 +201,7 @@ export default function CanvasInspector({ el, contentWindow, onPreview, onSave, 
                   max={1}
                   step={0.05}
                   value={parseFloat(values[desc.jsxKey]) || 0}
-                  onChange={(e) => change(desc.jsxKey, e.target.value)}
+                  onChange={(e) => changeStyle(desc.jsxKey, e.target.value)}
                   className="flex-1 accent-mc-lavender"
                 />
                 <span className="text-xs font-mono text-mc-gray/60 w-7 text-right shrink-0">
@@ -183,12 +211,36 @@ export default function CanvasInspector({ el, contentWindow, onPreview, onSave, 
             )}
           </div>
         ))}
+
+        {node.textEditable && (
+          <div className="flex items-center gap-2 pt-1 border-t border-mc-gray/10">
+            <span className="text-xs text-mc-gray w-24 shrink-0">Text</span>
+            <input
+              type="text"
+              value={text}
+              onChange={(e) => changeText(e.target.value)}
+              className="flex-1 min-w-0 text-xs bg-mc-dark/[0.03] border border-mc-gray/15 rounded px-2 py-1 text-mc-dark outline-none focus:border-mc-lavender/50"
+            />
+          </div>
+        )}
       </div>
 
-      <div className="px-3 py-2 border-t border-mc-gray/15 flex justify-end">
+      <div className="px-3 py-2 border-t border-mc-gray/15 flex items-center justify-between">
+        {node.deletable ? (
+          <button
+            onClick={onDelete}
+            className="flex items-center gap-1 text-xs text-mc-gray hover:text-red-500 transition-colors"
+            title="Delete element"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete
+          </button>
+        ) : (
+          <span />
+        )}
         <button
           onClick={handleSave}
-          disabled={dirty.size === 0}
+          disabled={!dirty}
           className="text-xs font-semibold bg-mc-lavender/20 hover:bg-mc-lavender/30 disabled:opacity-40 disabled:hover:bg-mc-lavender/20 text-mc-dark px-3 py-1.5 rounded transition-colors"
         >
           Save

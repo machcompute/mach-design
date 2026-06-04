@@ -8,13 +8,18 @@ import {
 import { useCanvasStore } from "@/app/store/canvas";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
-import { instrumentForEditing, applyStyleEdits } from "@/app/lib/instrument-tsx";
+import { instrumentForEditing, applyEdits, deleteNode, describeNode, type NodeInfo, type NodeEdits } from "@/app/lib/instrument-tsx";
 import { lintTsx, type Diagnostic } from "@/app/lib/lint-tsx";
 import CanvasInspector from "./canvas-inspector";
 
 const EDIT_CSS =
-  "*{cursor:crosshair !important}" +
+  "*{cursor:crosshair !important;user-select:none !important}" +
   "[data-mach-id]:hover{outline:2px solid rgba(184,179,233,0.5) !important;outline-offset:1px}";
+
+function swallow(e: Event) {
+  e.preventDefault();
+  e.stopPropagation();
+}
 
 function camelToKebab(s: string): string {
   return s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
@@ -114,9 +119,22 @@ export default function Canvas() {
   const [editMode, setEditMode] = useState(false);
   const [selectedMachId, setSelectedMachId] = useState<number | null>(null);
   const [selectedEl, setSelectedEl] = useState<Element | null>(null);
+  const [nodeInfo, setNodeInfo] = useState<NodeInfo | null>(null);
   const [selectionKey, setSelectionKey] = useState(0);
   const [showProblems, setShowProblems] = useState(false);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+
+  useEffect(() => {
+    if (selectedMachId === null) {
+      setNodeInfo(null);
+      return;
+    }
+    let cancelled = false;
+    describeNode(code, selectedMachId).then((info) => {
+      if (!cancelled) setNodeInfo(info);
+    });
+    return () => { cancelled = true; };
+  }, [selectedMachId, code]);
 
   useEffect(() => {
     if (!code.trim()) {
@@ -172,6 +190,7 @@ export default function Canvas() {
 
   const handleClick = useCallback((e: MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     const target = (e.target as Element)?.closest?.("[data-mach-id]") as HTMLElement | null;
     const doc = iframeRef.current?.contentDocument;
     if (!target || !doc) return;
@@ -195,11 +214,13 @@ export default function Canvas() {
       ["__mach_edit__", "__mach_select__", "__mach_preview__"].forEach((id) =>
         doc.getElementById(id)?.remove()
       );
-      doc.removeEventListener("click", handleClick);
+      doc.removeEventListener("click", handleClick, true);
+      doc.removeEventListener("mousedown", swallow, true);
 
       if (!editMode) return;
       upsertStyle(doc, "__mach_edit__", EDIT_CSS);
-      doc.addEventListener("click", handleClick);
+      doc.addEventListener("click", handleClick, true);
+      doc.addEventListener("mousedown", swallow, true);
     }
 
     inject();
@@ -212,7 +233,8 @@ export default function Canvas() {
         ["__mach_edit__", "__mach_select__", "__mach_preview__"].forEach((id) =>
           doc.getElementById(id)?.remove()
         );
-        doc.removeEventListener("click", handleClick);
+        doc.removeEventListener("click", handleClick, true);
+        doc.removeEventListener("mousedown", swallow, true);
       }
     };
   }, [editMode, handleClick]);
@@ -232,11 +254,8 @@ export default function Canvas() {
     upsertStyle(doc, "__mach_preview__", `[data-mach-id="${selectedMachId}"]{${body}}`);
   }
 
-  async function handleSave(styles: Record<string, string>) {
-    if (selectedMachId === null) return;
-    const newCode = await applyStyleEdits(code, selectedMachId, styles);
+  async function persist(newCode: string) {
     setCode(newCode, path);
-
     if (path) {
       const segments = path.split("/").filter(Boolean);
       const name = segments.pop();
@@ -245,9 +264,18 @@ export default function Canvas() {
         await useFilesystemStore.getState().uploadFilesTo(segments, [file]);
       }
     }
-
     setSelectedMachId(null);
     setSelectedEl(null);
+  }
+
+  async function handleSave(edits: NodeEdits) {
+    if (selectedMachId === null) return;
+    await persist(await applyEdits(code, selectedMachId, edits));
+  }
+
+  async function handleDelete() {
+    if (selectedMachId === null) return;
+    await persist(await deleteNode(code, selectedMachId));
   }
 
   function handleDeselect() {
@@ -351,13 +379,15 @@ export default function Canvas() {
         {showProblems && <ProblemsPanel diagnostics={diagnostics} />}
         {error && <ErrorOverlay message={error} />}
 
-        {editMode && selectedEl && selectedMachId !== null && iframeRef.current?.contentWindow && (
+        {editMode && selectedEl && nodeInfo && iframeRef.current?.contentWindow && (
           <CanvasInspector
             key={selectionKey}
             el={selectedEl}
+            node={nodeInfo}
             contentWindow={iframeRef.current.contentWindow}
             onPreview={handlePreview}
             onSave={handleSave}
+            onDelete={handleDelete}
             onClose={handleDeselect}
           />
         )}
