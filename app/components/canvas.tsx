@@ -8,9 +8,23 @@ import {
 import { useCanvasStore } from "@/app/store/canvas";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
-import { instrumentForEditing, applyEdits, deleteNode, describeNode, type NodeInfo, type NodeEdits } from "@/app/lib/instrument-tsx";
+import { instrumentForEditing, applyEdits, deleteNode, describeNode, getNodeSource, type NodeInfo, type NodeEdits } from "@/app/lib/instrument-tsx";
 import { lintTsx, type Diagnostic } from "@/app/lib/lint-tsx";
+import { useChatBridgeStore } from "@/app/store/chat-bridge";
 import CanvasInspector from "./canvas-inspector";
+
+function elementPath(el: Element): string {
+  const parts: string[] = [];
+  let cur: Element | null = el;
+  while (cur && cur.tagName !== "HTML") {
+    const tag = cur.tagName.toLowerCase();
+    const cls = Array.from(cur.classList).slice(0, 2).map((c) => `.${c}`).join("");
+    parts.unshift(tag + cls);
+    cur = cur.parentElement;
+    if (parts.length >= 4) { parts.unshift("…"); break; }
+  }
+  return parts.join(" > ");
+}
 
 const EDIT_CSS =
   "*{cursor:crosshair !important;user-select:none !important}" +
@@ -278,6 +292,19 @@ export default function Canvas() {
     await persist(await deleteNode(code, selectedMachId));
   }
 
+  async function handleSendToChat() {
+    if (selectedMachId === null || !selectedEl) return;
+    const src = await getNodeSource(code, selectedMachId);
+    if (!src) return;
+    const elPath = elementPath(selectedEl);
+    const fileName = path ? path.split("/").pop() : null;
+    useChatBridgeStore.getState().setReference({
+      label: fileName ? `${fileName} · ${elPath}` : elPath,
+      content: `Regarding this element in \`${path ?? "the current file"}\` (at ${elPath}):\n\n\`\`\`tsx\n${src}\n\`\`\`\n\n`,
+    });
+    document.querySelector<HTMLTextAreaElement>(".aui-composer-input")?.focus();
+  }
+
   function handleDeselect() {
     const doc = iframeRef.current?.contentDocument;
     if (doc) {
@@ -388,6 +415,7 @@ export default function Canvas() {
             onPreview={handlePreview}
             onSave={handleSave}
             onDelete={handleDelete}
+            onSendToChat={handleSendToChat}
             onClose={handleDeselect}
           />
         )}

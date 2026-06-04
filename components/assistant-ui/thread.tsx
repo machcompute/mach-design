@@ -32,6 +32,7 @@ import {
   SuggestionPrimitive,
   ThreadPrimitive,
   useAuiState,
+  useComposerRuntime,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -45,8 +46,31 @@ import {
   PencilIcon,
   RefreshCwIcon,
   SquareIcon,
+  Code2Icon,
+  XIcon,
 } from "lucide-react";
 import type { FC } from "react";
+import { useChatBridgeStore } from "@/app/store/chat-bridge";
+
+const ReferencePill: FC = () => {
+  const reference = useChatBridgeStore((s) => s.reference);
+  const clear = useChatBridgeStore((s) => s.clear);
+  if (!reference) return null;
+  return (
+    <div className="flex items-center gap-1.5 w-fit max-w-full px-2 py-1 bg-mc-mint/15 border border-mc-mint/30 rounded-md text-xs text-mc-dark">
+      <Code2Icon className="w-3 h-3 shrink-0 text-mc-gray" />
+      <span className="truncate font-mono">{reference.label}</span>
+      <button
+        type="button"
+        onClick={clear}
+        className="shrink-0 text-mc-gray hover:text-red-500 transition-colors"
+        aria-label="Remove reference"
+      >
+        <XIcon className="w-3 h-3" />
+      </button>
+    </div>
+  );
+};
 
 export const Thread: FC = () => {
   return (
@@ -138,9 +162,25 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC = () => {
+  const composer = useComposerRuntime();
+  const materializeReference = () => {
+    const { reference, clear } = useChatBridgeStore.getState();
+    if (!reference) return;
+    composer.setText(reference.content + composer.getState().text);
+    clear();
+  };
+
   return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone render={<div data-slot="aui_composer-shell" className="bg-background focus-within:border-ring/75 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50 flex w-full flex-col gap-2 rounded-(--composer-radius) border p-(--composer-padding) transition-shadow focus-within:ring-2 data-[dragging=true]:border-dashed" />}><ComposerAttachments /><ComposerPrimitive.Input
+    <ComposerPrimitive.Root
+      className="aui-composer-root relative flex w-full flex-col"
+      onKeyDownCapture={(e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) materializeReference();
+      }}
+      onClickCapture={(e) => {
+        if ((e.target as HTMLElement).closest('[aria-label="Send message"]')) materializeReference();
+      }}
+    >
+      <ComposerPrimitive.AttachmentDropzone render={<div data-slot="aui_composer-shell" className="bg-background focus-within:border-ring/75 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:bg-accent/50 flex w-full flex-col gap-2 rounded-(--composer-radius) border p-(--composer-padding) transition-shadow focus-within:ring-2 data-[dragging=true]:border-dashed" />}><ReferencePill /><ComposerAttachments /><ComposerPrimitive.Input
                       placeholder="Send a message..."
                       className="aui-composer-input placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none"
                       rows={1}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { X, Trash2 } from "lucide-react";
+import { X, Trash2, MessageSquarePlus } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -101,10 +101,11 @@ interface Props {
   onPreview: (styles: Record<string, string>) => void;
   onSave: (edits: NodeEdits) => void;
   onDelete: () => void;
+  onSendToChat: () => void;
   onClose: () => void;
 }
 
-export default function CanvasInspector({ el, node, contentWindow, onPreview, onSave, onDelete, onClose }: Props) {
+export default function CanvasInspector({ el, node, contentWindow, onPreview, onSave, onDelete, onSendToChat, onClose }: Props) {
   const cs = contentWindow.getComputedStyle(el as HTMLElement);
   const [values, setValues] = useState<Record<string, string>>(() => {
     const v: Record<string, string> = {};
@@ -223,6 +224,17 @@ export default function CanvasInspector({ el, node, contentWindow, onPreview, on
             />
           </div>
         )}
+      </div>
+
+      <div className="px-3 pb-2">
+        <button
+          onClick={onSendToChat}
+          className="flex items-center justify-center gap-1.5 w-full text-xs font-medium text-mc-dark bg-mc-mint/15 hover:bg-mc-mint/25 border border-mc-mint/30 rounded px-2 py-1.5 transition-colors"
+          title="Send this element to chat"
+        >
+          <MessageSquarePlus className="w-3.5 h-3.5" />
+          Send to chat
+        </button>
       </div>
 
       <div className="px-3 py-2 border-t border-mc-gray/15 flex items-center justify-between">

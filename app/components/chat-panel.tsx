@@ -391,6 +391,7 @@ function ChatTools() {
   return null;
 }
 
+
 function ClearButton() {
   const thread = useThreadRuntime();
   return (

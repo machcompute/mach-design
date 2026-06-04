@@ -163,6 +163,16 @@ export async function applyEdits(code: string, machId: number, edits: NodeEdits)
   return generate(ast).code;
 }
 
+export async function getNodeSource(code: string, machId: number): Promise<string | null> {
+  const { parse, generate } = await load();
+  const ast = parse(code, PARSE_OPTIONS);
+  let src: string | null = null;
+  walkHosts(ast.program.body, null, { i: 0 }, (el, id) => {
+    if (id === machId) src = generate(el as unknown as Node).code;
+  });
+  return src;
+}
+
 export async function deleteNode(code: string, machId: number): Promise<string> {
   const { parse, generate } = await load();
   const ast = parse(code, PARSE_OPTIONS);
