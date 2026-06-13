@@ -2,9 +2,15 @@
 
 import { useRef, useEffect, useState, useCallback } from "react";
 import {
-  Code2, RefreshCw, Trash2, ExternalLink, MousePointer2, Download,
+  Code2, RefreshCw, Trash2, ExternalLink, MousePointer2, Download, ChevronDown,
   CircleAlert, TriangleAlert, CircleCheck,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
@@ -350,15 +356,28 @@ export default function Canvas() {
     }
   }
 
-  function download() {
-    const name = path?.split("/").pop() || "App.tsx";
-    const blob = new Blob([code], { type: "text/plain" });
+  function triggerDownload(blob: Blob, name: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = name;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function downloadTsx() {
+    const name = path?.split("/").pop() || "App.tsx";
+    triggerDownload(new Blob([code], { type: "text/plain" }), name);
+  }
+
+  async function downloadHtml() {
+    const result = await transpileTsx(code);
+    if ("error" in result) {
+      setError(result.error);
+      return;
+    }
+    const base = (path?.split("/").pop() || "App.tsx").replace(/\.tsx?$/, "");
+    triggerDownload(new Blob([buildPreviewHtml(result.js)], { type: "text/html" }), `${base}.html`);
   }
 
   const errorCount = diagnostics.filter((d) => d.severity === "error").length;
@@ -427,10 +446,20 @@ export default function Canvas() {
           <ExternalLink className="w-3.5 h-3.5" />
           Open
         </ToolbarButton>
-        <ToolbarButton onClick={download} title="Download .tsx">
-          <Download className="w-3.5 h-3.5" />
-          Download
-        </ToolbarButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            title="Download"
+            className="flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors text-mc-gray hover:text-mc-dark hover:bg-mc-dark/[0.04] data-[popup-open]:text-mc-dark data-[popup-open]:bg-mc-dark/[0.04]"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Download
+            <ChevronDown className="w-3 h-3" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={downloadTsx}>TSX (.tsx)</DropdownMenuItem>
+            <DropdownMenuItem onClick={downloadHtml}>HTML (.html)</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <div className="flex-1" />
         <ToolbarButton onClick={clear} title="Clear canvas">
           <Trash2 className="w-3.5 h-3.5" />
