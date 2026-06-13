@@ -137,10 +137,11 @@ export default function Canvas() {
   const [selectionKey, setSelectionKey] = useState(0);
   const [showProblems, setShowProblems] = useState(false);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+  const [contentWindow, setContentWindow] = useState<Window | null>(null);
 
   useEffect(() => {
     if (selectedMachId === null) {
-      setNodeInfo(null);
+      queueMicrotask(() => setNodeInfo(null));
       return;
     }
     let cancelled = false;
@@ -152,7 +153,7 @@ export default function Canvas() {
 
   useEffect(() => {
     if (!code.trim()) {
-      setDiagnostics([]);
+      queueMicrotask(() => setDiagnostics([]));
       return;
     }
     let cancelled = false;
@@ -185,6 +186,7 @@ export default function Canvas() {
     function onLoad() {
       const win = iframe!.contentWindow;
       if (!win) return;
+      setContentWindow(win);
       win.addEventListener("error", onRuntimeError);
       win.addEventListener("unhandledrejection", onRuntimeError);
     }
@@ -281,6 +283,10 @@ export default function Canvas() {
       .map(([k, v]) => `${camelToKebab(k)}:${v} !important`)
       .join(";");
     upsertStyle(doc, "__mach_preview__", `[data-mach-id="${selectedMachId}"]{${body}}`);
+  }
+
+  function handleTextPreview(text: string) {
+    selectedEl?.replaceChildren(selectedEl.ownerDocument.createTextNode(text));
   }
 
   async function persist(newCode: string) {
@@ -421,13 +427,14 @@ export default function Canvas() {
         {showProblems && <ProblemsPanel diagnostics={diagnostics} />}
         {error && <ErrorOverlay message={error} />}
 
-        {editMode && selectedEl && nodeInfo && iframeRef.current?.contentWindow && (
+        {editMode && selectedEl && nodeInfo && contentWindow && (
           <CanvasInspector
             key={selectionKey}
             el={selectedEl}
             node={nodeInfo}
-            contentWindow={iframeRef.current.contentWindow}
+            contentWindow={contentWindow}
             onPreview={handlePreview}
+            onTextPreview={handleTextPreview}
             onSave={handleSave}
             onDelete={handleDelete}
             onSendToChat={handleSendToChat}

@@ -69,9 +69,11 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
 
   useEffect(() => {
     if (open) {
-      setDraft({ baseUrl: stored.baseUrl, apiKey: stored.apiKey, model: stored.model });
+      queueMicrotask(() =>
+        setDraft({ baseUrl: stored.baseUrl, apiKey: stored.apiKey, model: stored.model })
+      );
     }
-  }, [open]);
+  }, [open, stored.apiKey, stored.baseUrl, stored.model]);
 
   function set(key: keyof typeof draft) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>

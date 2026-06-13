@@ -58,25 +58,34 @@ function FilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
   const readFileAt = useFilesystemStore((s) => s.readFileAt);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const pathKey = path.join("/");
 
   useEffect(() => {
-    setLoading(true);
-    setContent(null);
+    let objectUrl: string | null = null;
+    let cancelled = false;
     (async () => {
+      setLoading(true);
+      setContent(null);
       try {
         const file = await readFileAt(path, entry.name);
+        if (cancelled) return;
         if (file.type.startsWith("image/")) {
-          setContent(`__img__${URL.createObjectURL(file)}`);
+          objectUrl = URL.createObjectURL(file);
+          setContent(`__img__${objectUrl}`);
         } else {
           setContent(await file.text());
         }
       } catch {
-        setContent("Could not read file.");
+        if (!cancelled) setContent("Could not read file.");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
-  }, [entry.name, path.join("/")]);
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [entry.name, path, pathKey, readFileAt]);
 
   return (
     <div className="h-full flex flex-col border-t border-mc-gray/15 overflow-hidden">
@@ -177,19 +186,23 @@ export default function FileBrowser() {
   }, [listPath]);
 
   useEffect(() => {
-    if (!opfsSupported()) {
-      setSupported(false);
-      return;
-    }
+    let cancelled = false;
     (async () => {
+      if (!opfsSupported()) {
+        setSupported(false);
+        return;
+      }
       try {
         await init();
-        await refresh([]);
+        if (!cancelled) await refresh([]);
       } catch {
-        setSupported(false);
+        if (!cancelled) setSupported(false);
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [init, refresh]);
 
   function navigateTo(idx: number) {
     const next = idx === -1 ? [] : path.slice(0, idx + 1);

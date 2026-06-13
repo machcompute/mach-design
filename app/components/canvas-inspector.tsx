@@ -99,13 +99,14 @@ interface Props {
   node: NodeInfo;
   contentWindow: Window;
   onPreview: (styles: Record<string, string>) => void;
+  onTextPreview: (text: string) => void;
   onSave: (edits: NodeEdits) => void;
   onDelete: () => void;
   onSendToChat: () => void;
   onClose: () => void;
 }
 
-export default function CanvasInspector({ el, node, contentWindow, onPreview, onSave, onDelete, onSendToChat, onClose }: Props) {
+export default function CanvasInspector({ el, node, contentWindow, onPreview, onTextPreview, onSave, onDelete, onSendToChat, onClose }: Props) {
   const cs = contentWindow.getComputedStyle(el as HTMLElement);
   const [values, setValues] = useState<Record<string, string>>(() => {
     const v: Record<string, string> = {};
@@ -129,7 +130,7 @@ export default function CanvasInspector({ el, node, contentWindow, onPreview, on
   function changeText(value: string) {
     setText(value);
     setTextDirty(true);
-    el.textContent = value;
+    onTextPreview(value);
   }
 
   function handleSave() {
