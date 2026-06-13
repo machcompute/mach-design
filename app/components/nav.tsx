@@ -43,7 +43,11 @@ export default function Nav() {
     <>
       <nav className="shrink-0 z-50 bg-white/90 backdrop-blur-md border-b border-mc-gray/15 h-16">
         <div className="w-full px-6 h-full flex items-center gap-8">
-          <div className="flex items-center gap-3">
+          <a
+            href="https://machcomputing.com"
+            aria-label="Mach Computing"
+            className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+          >
             <Image src="/logo.png" width={36} height={36} alt="Mach Computing" />
             <Image
               src="/text_logo.png"
@@ -53,7 +57,7 @@ export default function Nav() {
               className="hidden sm:block"
               priority
             />
-          </div>
+          </a>
           <div className="flex items-center gap-6">
             <button
               onClick={handleExport}
