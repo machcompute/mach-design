@@ -7,6 +7,16 @@ import {
 } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useFilesystemStore, type Entry, type FileEntry } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useWorkspaceStore } from "@/app/store/workspace";
@@ -28,7 +38,7 @@ function entryIcon(entry: Entry, className = "w-4 h-4") {
 
 function Breadcrumb({ path, onNavigate }: { path: string[]; onNavigate: (idx: number) => void }) {
   return (
-    <div className="flex items-center gap-1 px-3 py-2 border-b border-mc-gray/15 shrink-0 overflow-x-auto">
+    <div className="flex items-center gap-1 min-w-0 flex-1 overflow-x-auto pl-2">
       <button
         onClick={() => onNavigate(-1)}
         className="flex items-center gap-1 text-xs text-mc-gray hover:text-mc-dark transition-colors shrink-0"
@@ -168,11 +178,13 @@ function opfsSupported(): boolean {
 
 export default function FileBrowser() {
   const { init, listPath, uploadFilesTo, deleteAt, readFileAt } = useFilesystemStore();
+  const version = useFilesystemStore((s) => s.version);
   const [path, setPath] = useState<string[]>([]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(false);
   const [supported, setSupported] = useState(true);
+  const [pendingDelete, setPendingDelete] = useState<Entry | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async (p: string[]) => {
@@ -203,6 +215,12 @@ export default function FileBrowser() {
       cancelled = true;
     };
   }, [init, refresh]);
+
+  useEffect(() => {
+    if (version === 0) return;
+    refresh(path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
 
   function navigateTo(idx: number) {
     const next = idx === -1 ? [] : path.slice(0, idx + 1);
@@ -250,10 +268,11 @@ export default function FileBrowser() {
   }
 
   return (
+    <>
     <Group orientation="vertical" className="h-full">
       <Panel minSize="20%" defaultSize={selectedFile ? "60%" : "100%"}>
         <div className="h-full flex flex-col" onClick={() => setSelected(null)}>
-          <div className="flex items-center justify-between px-3 py-1.5 border-b border-mc-gray/15 shrink-0">
+          <div className="flex items-center justify-between gap-2 h-9 pl-3 pr-5 border-b border-mc-gray/15 shrink-0">
             <Breadcrumb path={path} onNavigate={navigateTo} />
             <button
               onClick={() => inputRef.current?.click()}
@@ -288,7 +307,7 @@ export default function FileBrowser() {
                     selected={selected?.name === entry.name}
                     onSelect={() => setSelected(selected?.name === entry.name ? null : entry)}
                     onOpen={() => openDir(entry.name)}
-                    onDelete={() => handleDelete(entry)}
+                    onDelete={() => setPendingDelete(entry)}
                     onPreview={isComponent(entry) ? async () => {
                       const file = await readFileAt(path, entry.name);
                       const fullPath = [...path, entry.name].join("/");
@@ -314,5 +333,34 @@ export default function FileBrowser() {
         </>
       )}
     </Group>
+
+    <AlertDialog open={!!pendingDelete} onOpenChange={(o) => { if (!o) setPendingDelete(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Delete {pendingDelete?.kind === "directory" ? "folder" : "file"} &ldquo;{pendingDelete?.name}&rdquo;?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {pendingDelete?.kind === "directory"
+              ? "This permanently removes the folder and everything inside it."
+              : "This permanently removes the file."}{" "}
+            This can&apos;t be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-red-500 hover:bg-red-600 text-white"
+            onClick={() => {
+              if (pendingDelete) handleDelete(pendingDelete);
+              setPendingDelete(null);
+            }}
+          >
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }
