@@ -138,6 +138,11 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
               <p className="text-xs text-mc-gray">
                 Base URL of your OpenAI-compatible server. Make sure CORS is enabled.
               </p>
+              <p className="text-xs text-mc-gray/70">
+                Any OpenAI-compatible provider works too — e.g. OpenRouter
+                (<code className="font-mono">https://openrouter.ai/api/v1</code>) or OpenAI
+                (<code className="font-mono">https://api.openai.com/v1</code>); add the provider&apos;s API key below.
+              </p>
 
               {mixed && (
                 <div className="mt-1 rounded-md border border-amber-300/60 bg-amber-50 p-3 space-y-2.5">
