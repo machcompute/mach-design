@@ -17,6 +17,8 @@ export type Entry = FileEntry | DirEntry;
 
 interface FilesystemState {
   initialized: boolean;
+  version: number;
+  bump: () => void;
   init: () => Promise<void>;
   listPath: (path: string[]) => Promise<Entry[]>;
   readFileAt: (path: string[], name: string) => Promise<File>;
@@ -61,6 +63,8 @@ async function listDir(path: string[]): Promise<Entry[]> {
 export const useFilesystemStore = create<FilesystemState>()((set, get) => ({
   initialized: false,
   uploads: [],
+  version: 0,
+  bump: () => set((s) => ({ version: s.version + 1 })),
 
   init: async () => {
     await getDirAt(["Uploads"]);

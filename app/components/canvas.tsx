@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useState, useCallback } from "react";
 import {
-  Code2, RefreshCw, Trash2, ExternalLink, MousePointer2,
+  Code2, RefreshCw, Trash2, ExternalLink, MousePointer2, Download,
   CircleAlert, TriangleAlert, CircleCheck,
 } from "lucide-react";
 import { useCanvasStore } from "@/app/store/canvas";
@@ -137,10 +137,11 @@ export default function Canvas() {
   const [selectionKey, setSelectionKey] = useState(0);
   const [showProblems, setShowProblems] = useState(false);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+  const [contentWindow, setContentWindow] = useState<Window | null>(null);
 
   useEffect(() => {
     if (selectedMachId === null) {
-      setNodeInfo(null);
+      queueMicrotask(() => setNodeInfo(null));
       return;
     }
     let cancelled = false;
@@ -152,7 +153,7 @@ export default function Canvas() {
 
   useEffect(() => {
     if (!code.trim()) {
-      setDiagnostics([]);
+      queueMicrotask(() => setDiagnostics([]));
       return;
     }
     let cancelled = false;
@@ -185,6 +186,7 @@ export default function Canvas() {
     function onLoad() {
       const win = iframe!.contentWindow;
       if (!win) return;
+      setContentWindow(win);
       win.addEventListener("error", onRuntimeError);
       win.addEventListener("unhandledrejection", onRuntimeError);
     }
@@ -192,7 +194,15 @@ export default function Canvas() {
 
     (async () => {
       try {
-        const src = editMode ? await instrumentForEditing(code) : code;
+        // Always render the instrumented source so toggling edit mode never
+        // reloads the iframe (no flicker). data-mach-id attrs are invisible.
+        // If Babel can't parse it, fall back to clean code so esbuild reports the error.
+        let src = code;
+        try {
+          src = await instrumentForEditing(code);
+        } catch {
+          src = code;
+        }
         if (cancelled) return;
         const result = await transpileTsx(src);
         if (cancelled) return;
@@ -215,7 +225,7 @@ export default function Canvas() {
       iframe.removeEventListener("load", onLoad);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [code, key, editMode]);
+  }, [code, key]);
 
   const handleClick = useCallback((e: MouseEvent) => {
     e.preventDefault();
@@ -283,6 +293,10 @@ export default function Canvas() {
     upsertStyle(doc, "__mach_preview__", `[data-mach-id="${selectedMachId}"]{${body}}`);
   }
 
+  function handleTextPreview(text: string) {
+    selectedEl?.replaceChildren(selectedEl.ownerDocument.createTextNode(text));
+  }
+
   async function persist(newCode: string) {
     setCode(newCode, path);
     if (path) {
@@ -336,6 +350,17 @@ export default function Canvas() {
     }
   }
 
+  function download() {
+    const name = path?.split("/").pop() || "App.tsx";
+    const blob = new Blob([code], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   const errorCount = diagnostics.filter((d) => d.severity === "error").length;
   const warningCount = diagnostics.length - errorCount;
   const drawerOpen = showCode || showProblems;
@@ -358,7 +383,7 @@ export default function Canvas() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-mc-gray/15 shrink-0">
+      <div className="flex items-center gap-1 h-9 pl-3 pr-5 border-b border-mc-gray/15 shrink-0">
         <ToolbarButton onClick={() => setKey((k) => k + 1)} title="Reload">
           <RefreshCw className="w-3.5 h-3.5" />
           Reload
@@ -402,6 +427,10 @@ export default function Canvas() {
           <ExternalLink className="w-3.5 h-3.5" />
           Open
         </ToolbarButton>
+        <ToolbarButton onClick={download} title="Download .tsx">
+          <Download className="w-3.5 h-3.5" />
+          Download
+        </ToolbarButton>
         <div className="flex-1" />
         <ToolbarButton onClick={clear} title="Clear canvas">
           <Trash2 className="w-3.5 h-3.5" />
@@ -421,13 +450,14 @@ export default function Canvas() {
         {showProblems && <ProblemsPanel diagnostics={diagnostics} />}
         {error && <ErrorOverlay message={error} />}
 
-        {editMode && selectedEl && nodeInfo && iframeRef.current?.contentWindow && (
+        {editMode && selectedEl && nodeInfo && contentWindow && (
           <CanvasInspector
             key={selectionKey}
             el={selectedEl}
             node={nodeInfo}
-            contentWindow={iframeRef.current.contentWindow}
+            contentWindow={contentWindow}
             onPreview={handlePreview}
+            onTextPreview={handleTextPreview}
             onSave={handleSave}
             onDelete={handleDelete}
             onSendToChat={handleSendToChat}

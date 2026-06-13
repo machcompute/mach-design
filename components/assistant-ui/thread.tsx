@@ -328,6 +328,34 @@ const AssistantActionBar: FC = () => {
   );
 };
 
+const REFERENCE_RE = /^Regarding this element in `([^`]+)` \(at ([^)]+)\):\n\n```tsx\n[\s\S]*?\n```\s*/;
+
+const UserParts: FC = () => {
+  const text = useAuiState((s) =>
+    (s.message.content as { type: string; text?: string }[])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("")
+  );
+  const match = text.match(REFERENCE_RE);
+  if (!match) return <MessagePrimitive.Parts />;
+
+  const file = match[1].split("/").pop() ?? match[1];
+  const rest = text.slice(match[0].length).trim();
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <span
+        className="inline-flex items-center gap-1 max-w-full rounded border border-mc-mint/40 bg-mc-mint/20 px-2 py-0.5 text-[11px] font-mono text-mc-dark"
+        title={`${match[1]} · ${match[2]}`}
+      >
+        <Code2Icon className="w-3 h-3 shrink-0 text-mc-gray" />
+        <span className="truncate">{file} · {match[2]}</span>
+      </span>
+      {rest && <span className="whitespace-pre-wrap">{rest}</span>}
+    </div>
+  );
+};
+
 const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -339,7 +367,7 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-2xl px-4 py-2.5 wrap-break-word empty:hidden">
-          <MessagePrimitive.Parts />
+          <UserParts />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />

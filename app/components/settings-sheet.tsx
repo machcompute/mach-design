@@ -69,9 +69,11 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
 
   useEffect(() => {
     if (open) {
-      setDraft({ baseUrl: stored.baseUrl, apiKey: stored.apiKey, model: stored.model });
+      queueMicrotask(() =>
+        setDraft({ baseUrl: stored.baseUrl, apiKey: stored.apiKey, model: stored.model })
+      );
     }
-  }, [open]);
+  }, [open, stored.apiKey, stored.baseUrl, stored.model]);
 
   function set(key: keyof typeof draft) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -135,6 +137,11 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
               />
               <p className="text-xs text-mc-gray">
                 Base URL of your OpenAI-compatible server. Make sure CORS is enabled.
+              </p>
+              <p className="text-xs text-mc-gray/70">
+                Any OpenAI-compatible provider works too — e.g. OpenRouter
+                (<code className="font-mono">https://openrouter.ai/api/v1</code>) or OpenAI
+                (<code className="font-mono">https://api.openai.com/v1</code>); add the provider&apos;s API key below.
               </p>
 
               {mixed && (

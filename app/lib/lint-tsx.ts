@@ -9,7 +9,13 @@ export interface Diagnostic {
 }
 
 const AMBIENT = `
-declare namespace JSX { interface IntrinsicElements { [e: string]: any; } interface Element {} }
+declare namespace JSX {
+  interface IntrinsicElements { [e: string]: any; }
+  interface Element {}
+  interface ElementClass {}
+  interface IntrinsicAttributes { key?: string | number | null; ref?: any; }
+  interface ElementChildrenAttribute { children: {}; }
+}
 declare const React: any;
 declare module "react" {
   export type SetState<S> = (v: S | ((p: S) => S)) => void;

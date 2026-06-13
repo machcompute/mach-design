@@ -30,12 +30,12 @@ const useFileSrc = (file: File | undefined) => {
 
   useEffect(() => {
     if (!file) {
-      setSrc(undefined);
+      queueMicrotask(() => setSrc(undefined));
       return;
     }
 
     const objectUrl = URL.createObjectURL(file);
-    setSrc(objectUrl);
+    queueMicrotask(() => setSrc(objectUrl));
 
     return () => {
       URL.revokeObjectURL(objectUrl);
