@@ -194,7 +194,15 @@ export default function Canvas() {
 
     (async () => {
       try {
-        const src = editMode ? await instrumentForEditing(code) : code;
+        // Always render the instrumented source so toggling edit mode never
+        // reloads the iframe (no flicker). data-mach-id attrs are invisible.
+        // If Babel can't parse it, fall back to clean code so esbuild reports the error.
+        let src = code;
+        try {
+          src = await instrumentForEditing(code);
+        } catch {
+          src = code;
+        }
         if (cancelled) return;
         const result = await transpileTsx(src);
         if (cancelled) return;
@@ -217,7 +225,7 @@ export default function Canvas() {
       iframe.removeEventListener("load", onLoad);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [code, key, editMode]);
+  }, [code, key]);
 
   const handleClick = useCallback((e: MouseEvent) => {
     e.preventDefault();
