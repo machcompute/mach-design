@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { toast } from "sonner";
 import { Settings, RefreshCw, TriangleAlert, Copy, Check } from "lucide-react";
 import {
   Sheet,
@@ -18,7 +19,6 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useSettingsStore, type ChatProvider } from "@/app/store/settings";
 import SettingsWebGpuPanel from "@/app/components/settings-webgpu-panel";
@@ -49,14 +49,19 @@ function mixedContentInfo(baseUrl: string) {
   };
 }
 
+const SAVE_DEBOUNCE_MS = 800;
+
 export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps) {
   const stored = useSettingsStore();
+  const setStored = stored.set;
   const [draft, setDraft] = useState({
     baseUrl: stored.baseUrl,
     apiKey: stored.apiKey,
     model: stored.model,
     provider: stored.provider,
   });
+  const [dirty, setDirty] = useState(false);
+  const wasOpen = useRef(false);
   const [models, setModels] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -71,21 +76,46 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
   const mixed = mixedContentInfo(draft.baseUrl);
 
   useEffect(() => {
-    if (open) {
-      queueMicrotask(() =>
+    if (open && !wasOpen.current) {
+      queueMicrotask(() => {
         setDraft({
           baseUrl: stored.baseUrl,
           apiKey: stored.apiKey,
           model: stored.model,
           provider: stored.provider,
-        })
-      );
+        });
+        setDirty(false);
+      });
     }
+    wasOpen.current = open;
   }, [open, stored.apiKey, stored.baseUrl, stored.model, stored.provider]);
 
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = setTimeout(() => {
+      setStored(draft);
+      setDirty(false);
+      toast.success("Settings saved");
+    }, SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [dirty, draft, setStored]);
+
+  function updateDraft(patch: Partial<typeof draft>) {
+    setDraft((prev) => ({ ...prev, ...patch }));
+    setDirty(true);
+  }
+
   function set(key: keyof typeof draft) {
-    return (e: React.ChangeEvent<HTMLInputElement>) =>
-      setDraft((prev) => ({ ...prev, [key]: e.target.value }));
+    return (e: React.ChangeEvent<HTMLInputElement>) => updateDraft({ [key]: e.target.value });
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next && dirty) {
+      setStored(draft);
+      setDirty(false);
+      toast.success("Settings saved");
+    }
+    onOpenChange(next);
   }
 
   async function fetchModels() {
@@ -101,7 +131,7 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
       const ids: string[] = (json.data ?? []).map((m: { id: string }) => m.id).sort();
       setModels(ids);
       if (ids.length > 0 && !ids.includes(draft.model)) {
-        setDraft((prev) => ({ ...prev, model: ids[0] }));
+        updateDraft({ model: ids[0] });
       }
     } catch (err) {
       setFetchError(err instanceof Error ? err.message : "Failed to fetch models");
@@ -110,13 +140,8 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
     }
   }
 
-  function handleSave() {
-    stored.set(draft);
-    onOpenChange(false);
-  }
-
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={handleOpenChange}>
       <SheetContent side="right" className="w-full sm:max-w-md flex flex-col gap-0 p-0">
         <SheetHeader className="px-6 py-5 border-b border-mc-gray/15">
           <div className="flex items-center gap-2">
@@ -134,9 +159,7 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
 
             <Tabs
               value={draft.provider}
-              onValueChange={(value) =>
-                setDraft((prev) => ({ ...prev, provider: (value as ChatProvider) ?? "byok" }))
-              }
+              onValueChange={(value) => updateDraft({ provider: (value as ChatProvider) ?? "byok" })}
             >
               <TabsList className="w-full grid grid-cols-2">
                 <TabsTrigger value="byok">Bring your own key</TabsTrigger>
@@ -260,7 +283,7 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
 
               <Select
                 value={draft.model}
-                onValueChange={(value) => setDraft((prev) => ({ ...prev, model: value ?? "" }))}
+                onValueChange={(value) => updateDraft({ model: value ?? "" })}
               >
                 <SelectTrigger className="w-full font-mono text-sm">
                   <SelectValue placeholder="Select a model…" />
@@ -287,15 +310,6 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
               </TabsContent>
             </Tabs>
           </section>
-        </div>
-
-        <div className="px-6 py-4 border-t border-mc-gray/15">
-          <Button
-            onClick={handleSave}
-            className="w-full bg-mc-dark text-white hover:bg-mc-dark/85 rounded-full font-medium text-sm transition-colors"
-          >
-            Save
-          </Button>
         </div>
       </SheetContent>
     </Sheet>
