@@ -51,6 +51,8 @@ import {
 } from "lucide-react";
 import type { FC } from "react";
 import { useChatBridgeStore } from "@/app/store/chat-bridge";
+import { useEngineStore } from "@/app/store/engine";
+import { useSettingsStore } from "@/app/store/settings";
 
 const ReferencePill: FC = () => {
   const reference = useChatBridgeStore((s) => s.reference);
@@ -194,13 +196,75 @@ const Composer: FC = () => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
+      <div className="flex items-center gap-2">
+        <ComposerAddAttachment />
+        <ContextUsageRing />
+      </div>
       <AuiIf condition={(s) => !s.thread.isRunning}>
         <ComposerPrimitive.Send render={<TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message" />}><ArrowUpIcon className="aui-composer-send-icon size-4" /></ComposerPrimitive.Send>
       </AuiIf>
       <AuiIf condition={(s) => s.thread.isRunning}>
         <ComposerPrimitive.Cancel render={<Button type="button" variant="default" size="icon" className="aui-composer-cancel size-8 rounded-full" aria-label="Stop generating" />}><SquareIcon className="aui-composer-cancel-icon size-3 fill-current" /></ComposerPrimitive.Cancel>
       </AuiIf>
+    </div>
+  );
+};
+
+const ContextUsageRing: FC = () => {
+  const provider = useSettingsStore((s) => s.provider);
+  const used = useEngineStore((s) => s.contextUsedTokens);
+  const max = useEngineStore((s) => s.contextMaxTokens);
+  const hasContext = max > 0;
+  // Context tracking only exists for the local WebGPU engine.
+  if (provider !== "webgpu") return null;
+  const pct = hasContext ? Math.min(1, Math.max(0, used / max)) : 0;
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
+  const remaining = circumference * (1 - pct);
+  const percentLabel = Math.round(pct * 100);
+  const title = hasContext
+    ? `${used.toLocaleString()} / ${max.toLocaleString()} context tokens used (${percentLabel}%)`
+    : "Local context usage unavailable";
+
+  return (
+    <div
+      className="relative flex size-8 shrink-0 items-center justify-center rounded-full text-mc-gray"
+      title={title}
+      aria-label={title}
+      role="meter"
+      aria-valuemin={0}
+      aria-valuemax={hasContext ? max : 100}
+      aria-valuenow={hasContext ? used : 0}
+    >
+      <svg viewBox="0 0 24 24" className="size-6 -rotate-90" aria-hidden="true">
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="opacity-20"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={remaining}
+          className={cn(
+            "transition-[stroke-dashoffset,stroke] duration-300",
+            pct >= 0.9 ? "text-red-500" : pct >= 0.7 ? "text-amber-500" : "text-mc-dark"
+          )}
+        />
+      </svg>
+      <span className="absolute text-[9px] font-medium tabular-nums leading-none text-mc-gray">
+        {percentLabel}
+      </span>
     </div>
   );
 };

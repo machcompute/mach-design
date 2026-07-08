@@ -19,7 +19,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { useSettingsStore } from "@/app/store/settings";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useSettingsStore, type ChatProvider } from "@/app/store/settings";
+import SettingsWebGpuPanel from "@/app/components/settings-webgpu-panel";
 
 interface SettingsSheetProps {
   open: boolean;
@@ -53,6 +55,7 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
     baseUrl: stored.baseUrl,
     apiKey: stored.apiKey,
     model: stored.model,
+    provider: stored.provider,
   });
   const [models, setModels] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
@@ -70,10 +73,15 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
   useEffect(() => {
     if (open) {
       queueMicrotask(() =>
-        setDraft({ baseUrl: stored.baseUrl, apiKey: stored.apiKey, model: stored.model })
+        setDraft({
+          baseUrl: stored.baseUrl,
+          apiKey: stored.apiKey,
+          model: stored.model,
+          provider: stored.provider,
+        })
       );
     }
-  }, [open, stored.apiKey, stored.baseUrl, stored.model]);
+  }, [open, stored.apiKey, stored.baseUrl, stored.model, stored.provider]);
 
   function set(key: keyof typeof draft) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -124,6 +132,22 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
           <section className="space-y-4">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-mc-gray/60">Model</h3>
 
+            <Tabs
+              value={draft.provider}
+              onValueChange={(value) =>
+                setDraft((prev) => ({ ...prev, provider: (value as ChatProvider) ?? "byok" }))
+              }
+            >
+              <TabsList className="w-full grid grid-cols-2">
+                <TabsTrigger value="byok">Bring your own key</TabsTrigger>
+                <TabsTrigger value="webgpu">Local (WebGPU)</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="webgpu" className="pt-4">
+                <SettingsWebGpuPanel />
+              </TabsContent>
+
+              <TabsContent value="byok" className="space-y-4 pt-4">
             <div className="space-y-2">
               <Label htmlFor="base-url" className="text-sm font-medium text-mc-dark">
                 Endpoint URL
@@ -260,6 +284,8 @@ export default function SettingsSheet({ open, onOpenChange }: SettingsSheetProps
                 <p className="text-xs text-red-500">{fetchError}</p>
               )}
             </div>
+              </TabsContent>
+            </Tabs>
           </section>
         </div>
 

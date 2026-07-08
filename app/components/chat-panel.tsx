@@ -15,30 +15,127 @@ import {
   type ThreadMessage,
 } from "@assistant-ui/react";
 import { Eraser } from "lucide-react";
-import { toJSONSchema } from "assistant-stream";
 import { Thread } from "@/components/assistant-ui/thread";
 import { useSettingsStore } from "@/app/store/settings";
 import { useFilesystemStore } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useWorkspaceStore } from "@/app/store/workspace";
 import { lintTsx } from "@/app/lib/lint-tsx";
+import {
+  normalizeToolResultForModel,
+  parseToolArgsText,
+  stringifyToolResultForModel,
+  stringifyToolResult,
+  toFunctionToolDefs,
+} from "@/app/lib/chat-tools";
+import { localAdapter } from "@/app/lib/llm/adapter";
+
+type FnToolCall = OpenAI.ChatCompletionMessageToolCall & { type: "function" };
+type Part = TextMessagePart | ToolCallMessagePart;
+
+const LEGACY_FUNCTION_CALL_ID_PREFIX = "call_mach_legacy_";
+
+function makeToolCallId(round: number, index: number, legacy = false) {
+  return `call_mach_${legacy ? "legacy_" : ""}${round}_${index}_${Math.random().toString(36).slice(2)}`;
+}
+
+function isLegacyToolCallId(toolCallId: string) {
+  return toolCallId.startsWith(LEGACY_FUNCTION_CALL_ID_PREFIX);
+}
+
+// Handles both delta-style streams (append) and providers that resend the
+// full accumulated value so far (replace, detected via prefix match). A
+// genuine delta that exactly repeats the accumulation (e.g. a name streamed
+// as "foo" + "foo") is indistinguishable from a resend and treated as one.
+function mergeStreamField(current: string, next: unknown): string {
+  if (next === undefined || next === null) return current;
+  const chunk = typeof next === "string" ? next : JSON.stringify(next) ?? String(next);
+  if (!current) return chunk;
+  if (chunk === current || chunk.startsWith(current)) return chunk;
+  return current + chunk;
+}
+
+function tryParseToolArgs(argsText: string): Record<string, unknown> {
+  try {
+    return parseToolArgsText(argsText);
+  } catch {
+    return {};
+  }
+}
 
 function toOpenAIMessages(
   messages: readonly ThreadMessage[]
 ): OpenAI.ChatCompletionMessageParam[] {
   const result: OpenAI.ChatCompletionMessageParam[] = [];
   for (const m of messages) {
-    const text = m.content
-      .filter((c): c is TextMessagePart => c.type === "text")
-      .map((c) => c.text)
-      .join("");
-    if (m.role === "user") result.push({ role: "user", content: text });
-    else if (m.role === "assistant") result.push({ role: "assistant", content: text });
+    if (m.role === "user") {
+      const text = m.content
+        .filter((c): c is TextMessagePart => c.type === "text")
+        .map((c) => c.text)
+        .join("");
+      result.push({ role: "user", content: text });
+    } else if (m.role === "assistant") {
+      let text = "";
+      let pendingToolCalls: FnToolCall[] = [];
+      let pendingToolMessages: OpenAI.ChatCompletionToolMessageParam[] = [];
+
+      const flushTools = () => {
+        if (!pendingToolCalls.length) return;
+        result.push({ role: "assistant", content: text || null, tool_calls: pendingToolCalls });
+        result.push(...pendingToolMessages);
+        text = "";
+        pendingToolCalls = [];
+        pendingToolMessages = [];
+      };
+
+      for (const part of m.content) {
+        if (part.type === "text") {
+          flushTools();
+          text += part.text;
+        } else if (
+          part.type === "tool-call" &&
+          part.toolCallId &&
+          part.toolName &&
+          part.result !== undefined
+        ) {
+          const argsText = part.argsText || stringifyToolResult(part.args ?? {});
+          const modelText = stringifyToolResultForModel(part.result, part.modelContent);
+          if (isLegacyToolCallId(part.toolCallId)) {
+            flushTools();
+            result.push({
+              role: "assistant",
+              content: text || null,
+              function_call: { name: part.toolName, arguments: argsText },
+            });
+            result.push({ role: "function", name: part.toolName, content: modelText });
+            text = "";
+            continue;
+          }
+
+          pendingToolCalls.push({
+            id: part.toolCallId,
+            type: "function",
+            function: {
+              name: part.toolName,
+              arguments: argsText,
+            },
+          });
+          pendingToolMessages.push({
+            role: "tool",
+            tool_call_id: part.toolCallId,
+            content: modelText,
+          });
+        }
+      }
+
+      flushTools();
+      if (text) result.push({ role: "assistant", content: text });
+    }
   }
   return result;
 }
 
-const adapter: ChatModelAdapter = {
+const byokAdapter: ChatModelAdapter = {
   async *run({ messages, abortSignal, context }: ChatModelRunOptions) {
     const { baseUrl, apiKey, model } = useSettingsStore.getState();
 
@@ -51,29 +148,18 @@ const adapter: ChatModelAdapter = {
       dangerouslyAllowBrowser: true,
     });
 
-    const tools = context.tools
-      ? Object.entries(context.tools)
-          .filter(([, t]) => t.parameters !== undefined)
-          .map(([name, t]) => ({
-            type: "function" as const,
-            function: {
-              name,
-              description: t.description ?? "",
-              parameters: toJSONSchema(t.parameters!) as Record<string, unknown>,
-            },
-          }))
-      : undefined;
+    const tools = toFunctionToolDefs(context.tools);
 
     const history: OpenAI.ChatCompletionMessageParam[] = [
       ...(context.system ? [{ role: "system" as const, content: context.system }] : []),
       ...toOpenAIMessages(messages),
     ];
 
-    type FnToolCall = OpenAI.ChatCompletionMessageToolCall & { type: "function" };
-    type Part = TextMessagePart | ToolCallMessagePart;
     const parts: Part[] = [];
 
-    while (true) {
+    // Unbounded tool rounds: each turn ends when the model replies without
+    // tool calls, on abort, or on a malformed call it can't recover from.
+    for (let round = 0; ; round++) {
       const stream = await client.chat.completions.create(
         {
           model,
@@ -85,8 +171,45 @@ const adapter: ChatModelAdapter = {
       );
 
       let textPartIdx = -1;
-      const toolCalls: FnToolCall[] = [];
-      const toolCallPartIdx: number[] = [];
+      const toolCalls = new Map<number, FnToolCall>();
+      const toolCallPartIdx = new Map<number, number>();
+      let usesLegacyFunctionCall = false;
+
+      const ensureToolCall = (index: number, id?: string, legacy = false): FnToolCall => {
+        const toolCall = toolCalls.get(index);
+        if (!toolCall) {
+          const nextToolCall = {
+            id: id || makeToolCallId(round, index, legacy),
+            type: "function",
+            function: { name: "", arguments: "" },
+          } as FnToolCall;
+          toolCalls.set(index, nextToolCall);
+          toolCallPartIdx.set(index, parts.length);
+          parts.push({
+            type: "tool-call",
+            toolCallId: nextToolCall.id,
+            toolName: "",
+            argsText: "",
+            args: {},
+          });
+          return nextToolCall;
+        }
+        if (id) toolCall.id = id;
+        return toolCall;
+      };
+
+      const syncToolPart = (index: number) => {
+        const toolCall = toolCalls.get(index);
+        const partIdx = toolCallPartIdx.get(index);
+        if (!toolCall || partIdx === undefined) return;
+        parts[partIdx] = {
+          type: "tool-call",
+          toolCallId: toolCall.id,
+          toolName: toolCall.function.name,
+          argsText: toolCall.function.arguments,
+          args: tryParseToolArgs(toolCall.function.arguments) as ToolCallMessagePart["args"],
+        };
+      };
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
@@ -104,58 +227,133 @@ const adapter: ChatModelAdapter = {
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
-            if (!toolCalls[idx]) {
-              toolCalls[idx] = { id: tc.id ?? "", type: "function", function: { name: "", arguments: "" } } as FnToolCall;
-              toolCallPartIdx[idx] = parts.length;
-              parts.push({ type: "tool-call", toolCallId: tc.id ?? "", toolName: "", argsText: "", args: {} });
-            }
-            if (tc.id) toolCalls[idx].id = tc.id;
-            if (tc.function?.name) toolCalls[idx].function.name += tc.function.name;
-            if (tc.function?.arguments) toolCalls[idx].function.arguments += tc.function.arguments;
-
-            parts[toolCallPartIdx[idx]] = {
-              type: "tool-call",
-              toolCallId: toolCalls[idx].id,
-              toolName: toolCalls[idx].function.name,
-              argsText: toolCalls[idx].function.arguments,
-              args: {},
-            };
+            const toolCall = ensureToolCall(idx, tc.id);
+            toolCall.function.name = mergeStreamField(toolCall.function.name, tc.function?.name);
+            toolCall.function.arguments = mergeStreamField(toolCall.function.arguments, tc.function?.arguments);
+            syncToolPart(idx);
             yield { content: [...parts] };
           }
         }
+
+        if (delta?.function_call) {
+          usesLegacyFunctionCall = true;
+          const toolCall = ensureToolCall(0, undefined, true);
+          toolCall.function.name = mergeStreamField(toolCall.function.name, delta.function_call.name);
+          toolCall.function.arguments = mergeStreamField(toolCall.function.arguments, delta.function_call.arguments);
+          syncToolPart(0);
+          yield { content: [...parts] };
+        }
       }
 
-      if (toolCalls.length === 0) break;
+      const completedToolCalls = [...toolCalls.entries()].sort(([a], [b]) => a - b);
+      if (completedToolCalls.length === 0) return;
 
-      history.push({ role: "assistant", content: (parts[textPartIdx] as TextMessagePart | undefined)?.text || null, tool_calls: toolCalls });
+      const toolResults: Array<{
+        index: number;
+        toolCall: FnToolCall;
+        result: unknown;
+        modelText: string;
+        isError: boolean;
+        modelContent?: ToolCallMessagePart["modelContent"];
+      }> = [];
+      let cannotContinue = false;
 
-      for (let i = 0; i < toolCalls.length; i++) {
-        const tc = toolCalls[i];
-        const toolDef = context.tools?.[tc.function.name];
-        let result: unknown = "unknown tool";
-        let isError = false;
-        if (toolDef?.execute) {
+      for (const [index, tc] of completedToolCalls) {
+        const toolName = tc.function.name.trim();
+        tc.function.name = toolName;
+
+        let args: Record<string, unknown> = {};
+        let result: unknown;
+        let modelText: string;
+        let isError = true;
+        let modelContent: ToolCallMessagePart["modelContent"];
+
+        if (!toolName) {
+          result = "Error: model emitted a tool call without a function name.";
+          modelText = stringifyToolResult(result);
+          cannotContinue = true;
+        } else {
           try {
-            const args = JSON.parse(tc.function.arguments || "{}");
-            const out = await toolDef.execute(args, {
-              toolCallId: tc.id,
-              abortSignal,
-              human: () => Promise.resolve(null),
-            });
-            result = out;
+            args = parseToolArgsText(tc.function.arguments);
           } catch (e) {
-            result = `Error: ${e}`;
+            result = `Error: invalid JSON tool arguments for ${toolName}: ${e}`;
+            tc.function.arguments = "{}";
+            modelText = stringifyToolResult(result);
+            toolResults.push({ index, toolCall: tc, result, modelText, isError });
+            const partIdx = toolCallPartIdx.get(index);
+            if (partIdx !== undefined) parts[partIdx] = {
+              ...(parts[partIdx] as ToolCallMessagePart),
+              args: {} as ToolCallMessagePart["args"],
+              argsText: "{}",
+              result,
+              isError,
+            };
+            yield { content: [...parts] };
+            continue;
+          }
+
+          const toolDef = context.tools?.[toolName];
+          if (toolDef?.execute) {
+            try {
+              const out = await toolDef.execute(args, {
+                toolCallId: tc.id,
+                abortSignal,
+                human: () => Promise.resolve(null),
+              });
+              const normalized = await normalizeToolResultForModel(toolDef, out, args, tc.id);
+              result = normalized.result;
+              modelText = normalized.modelText;
+              modelContent = normalized.modelContent;
+              isError = normalized.isError;
+            } catch (e) {
+              result = `Error: ${e}`;
+              modelText = stringifyToolResult(result);
+              isError = true;
+            }
+          } else {
+            result = `Unknown tool: ${toolName}`;
+            modelText = stringifyToolResult(result);
             isError = true;
           }
         }
-        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
-        parts[toolCallPartIdx[i]] = {
-          ...(parts[toolCallPartIdx[i]] as ToolCallMessagePart),
+
+        toolResults.push({ index, toolCall: tc, result, modelText, isError, modelContent });
+        const partIdx = toolCallPartIdx.get(index);
+        if (partIdx !== undefined) parts[partIdx] = {
+          ...(parts[partIdx] as ToolCallMessagePart),
+          args: args as ToolCallMessagePart["args"],
+          argsText: tc.function.arguments,
           result,
           isError,
+          modelContent,
         };
         yield { content: [...parts] };
-        history.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
+      }
+
+      if (cannotContinue || abortSignal.aborted) return;
+
+      const roundText = (parts[textPartIdx] as TextMessagePart | undefined)?.text || null;
+      if (usesLegacyFunctionCall && toolResults.every(({ toolCall }) => isLegacyToolCallId(toolCall.id))) {
+        for (const { toolCall, modelText } of toolResults) {
+          history.push({
+            role: "assistant",
+            content: roundText,
+            function_call: {
+              name: toolCall.function.name,
+              arguments: toolCall.function.arguments,
+            },
+          });
+          history.push({ role: "function", name: toolCall.function.name, content: modelText });
+        }
+      } else {
+        history.push({
+          role: "assistant",
+          content: roundText,
+          tool_calls: toolResults.map(({ toolCall }) => toolCall),
+        });
+        for (const { toolCall, modelText } of toolResults) {
+          history.push({ role: "tool", tool_call_id: toolCall.id, content: modelText });
+        }
       }
     }
   },
@@ -409,7 +607,8 @@ function ClearButton() {
 }
 
 export default function ChatPanel() {
-  const runtime = useLocalRuntime(adapter);
+  const provider = useSettingsStore((s) => s.provider);
+  const runtime = useLocalRuntime(provider === "webgpu" ? localAdapter : byokAdapter);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
