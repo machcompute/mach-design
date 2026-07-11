@@ -1,9 +1,10 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
+import { toast } from "sonner";
 import {
   Code2, RefreshCw, Trash2, ExternalLink, MousePointer2, Download, ChevronDown,
-  CircleAlert, TriangleAlert, CircleCheck,
+  CircleAlert, TriangleAlert, CircleCheck, ArrowLeft,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -12,12 +13,36 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { useCanvasStore } from "@/app/store/canvas";
-import { useFilesystemStore } from "@/app/store/filesystem";
-import { transpileTsx, buildPreviewHtml } from "@/app/lib/render-tsx";
+import { useFilesystemStore, type Entry } from "@/app/store/filesystem";
+import { PAGES_ROOT, resolveLinkCandidates, readPage } from "@/app/lib/page-links";
+import { transpileTsx, buildPreviewHtml, buildStandaloneHtml, type StandalonePage } from "@/app/lib/render-tsx";
 import { instrumentForEditing, applyEdits, deleteNode, describeNode, getNodeSource, type NodeInfo, type NodeEdits } from "@/app/lib/instrument-tsx";
 import { lintTsx, type Diagnostic } from "@/app/lib/lint-tsx";
 import { useChatBridgeStore } from "@/app/store/chat-bridge";
 import CanvasInspector from "./canvas-inspector";
+
+async function collectOutputsPages(): Promise<Array<{ key: string; code: string }>> {
+  const store = useFilesystemStore.getState();
+  const pages: Array<{ key: string; code: string }> = [];
+  async function walkDir(dir: string[]) {
+    let entries: Entry[];
+    try {
+      entries = await store.listPath(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.kind === "directory") {
+        await walkDir([...dir, entry.name]);
+      } else if (/\.(tsx|jsx)$/i.test(entry.name)) {
+        const file = await store.readFileAt(dir, entry.name);
+        pages.push({ key: [...dir.slice(1), entry.name].join("/"), code: await file.text() });
+      }
+    }
+  }
+  await walkDir([...PAGES_ROOT]);
+  return pages;
+}
 
 function elementPath(el: Element): string {
   const parts: string[] = [];
@@ -131,7 +156,7 @@ function ProblemsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
 }
 
 export default function Canvas() {
-  const { code, path, setCode, clear } = useCanvasStore();
+  const { code, path, history, setCode, clear } = useCanvasStore();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [showCode, setShowCode] = useState(false);
   const [key, setKey] = useState(0);
@@ -164,14 +189,14 @@ export default function Canvas() {
     }
     let cancelled = false;
     const handle = setTimeout(async () => {
-      const result = await lintTsx(code);
+      const result = await lintTsx(code, path);
       if (!cancelled) setDiagnostics(result);
     }, 400);
     return () => {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [code]);
+  }, [code, path]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -232,6 +257,49 @@ export default function Canvas() {
       if (url) URL.revokeObjectURL(url);
     };
   }, [code, key]);
+
+  const openLink = useCallback(
+    async (href: string) => {
+      const candidates = resolveLinkCandidates(path, href);
+      if (!candidates.length) return;
+      for (const segments of candidates) {
+        const page = await readPage(segments);
+        if (page) {
+          useCanvasStore.getState().navigate(page.text, page.path.join("/"));
+          return;
+        }
+      }
+      toast.error(`Linked page not found: ${href}`);
+    },
+    [path]
+  );
+
+  useEffect(() => {
+    function onMessage(ev: MessageEvent) {
+      if (ev.source !== iframeRef.current?.contentWindow) return;
+      const data = ev.data as { __mach?: string; href?: string } | null;
+      if (!data || typeof data.href !== "string") return;
+      if (data.__mach === "navigate") {
+        openLink(data.href);
+      } else if (data.__mach === "open-external") {
+        window.open(data.href, "_blank", "noopener,noreferrer");
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [openLink]);
+
+  async function goBack() {
+    const store = useCanvasStore.getState();
+    const prev = store.popHistory();
+    if (!prev) return;
+    const page = await readPage(prev.split("/").filter(Boolean));
+    if (!page) {
+      toast.error(`Previous page is gone: ${prev}`);
+      return;
+    }
+    store.restore(page.text, prev);
+  }
 
   const handleClick = useCallback((e: MouseEvent) => {
     e.preventDefault();
@@ -350,10 +418,40 @@ export default function Canvas() {
     setSelectedEl(null);
   }
 
-  function openInTab() {
-    if (iframeRef.current?.src?.startsWith("blob:")) {
-      window.open(iframeRef.current.src, "_blank");
+  async function buildFullHtml(): Promise<string | null> {
+    const inOutputs = path?.split("/")[0]?.toLowerCase() === PAGES_ROOT[0].toLowerCase();
+    if (!inOutputs) {
+      const result = await transpileTsx(code);
+      if ("error" in result) {
+        setError(result.error);
+        return null;
+      }
+      return buildPreviewHtml(result.js);
     }
+
+    const entryKey = path!.split("/").slice(1).join("/");
+    const files = await collectOutputsPages();
+    if (!files.some((f) => f.key === entryKey)) files.push({ key: entryKey, code });
+
+    const pages: StandalonePage[] = [];
+    for (const f of files) {
+      const result = await transpileTsx(f.key === entryKey ? code : f.code);
+      if ("error" in result) {
+        if (f.key === entryKey) {
+          setError(result.error);
+          return null;
+        }
+        continue;
+      }
+      pages.push({ key: f.key, js: result.js });
+    }
+    return buildStandaloneHtml(pages, entryKey);
+  }
+
+  async function openInTab() {
+    const html = await buildFullHtml();
+    if (!html) return;
+    window.open(URL.createObjectURL(new Blob([html], { type: "text/html" })), "_blank");
   }
 
   function triggerDownload(blob: Blob, name: string) {
@@ -371,13 +469,10 @@ export default function Canvas() {
   }
 
   async function downloadHtml() {
-    const result = await transpileTsx(code);
-    if ("error" in result) {
-      setError(result.error);
-      return;
-    }
+    const html = await buildFullHtml();
+    if (!html) return;
     const base = (path?.split("/").pop() || "App.tsx").replace(/\.tsx?$/, "");
-    triggerDownload(new Blob([buildPreviewHtml(result.js)], { type: "text/html" }), `${base}.html`);
+    triggerDownload(new Blob([html], { type: "text/html" }), `${base}.html`);
   }
 
   const errorCount = diagnostics.filter((d) => d.severity === "error").length;
@@ -403,6 +498,12 @@ export default function Canvas() {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center gap-1 h-9 pl-3 pr-5 border-b border-mc-gray/15 shrink-0">
+        {history.length > 0 && (
+          <ToolbarButton onClick={goBack} title="Back to previous page">
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back
+          </ToolbarButton>
+        )}
         <ToolbarButton onClick={() => setKey((k) => k + 1)} title="Reload">
           <RefreshCw className="w-3.5 h-3.5" />
           Reload
@@ -461,6 +562,11 @@ export default function Canvas() {
           </DropdownMenuContent>
         </DropdownMenu>
         <div className="flex-1" />
+        {path && (
+          <span className="text-[11px] font-mono text-mc-gray/60 truncate max-w-[200px] px-2" title={path}>
+            {path}
+          </span>
+        )}
         <ToolbarButton onClick={clear} title="Clear canvas">
           <Trash2 className="w-3.5 h-3.5" />
           Clear

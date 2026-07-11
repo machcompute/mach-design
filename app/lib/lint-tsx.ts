@@ -1,11 +1,12 @@
 import type { ParserOptions } from "@babel/parser";
+import { resolveLinkCandidates, resolvePagePath } from "@/app/lib/page-links";
 
 export interface Diagnostic {
   severity: "error" | "warning";
   line: number;
   column: number;
   message: string;
-  source: "ts" | "react-hooks" | "imports";
+  source: "ts" | "react-hooks" | "imports" | "links";
 }
 
 const AMBIENT = `
@@ -886,12 +887,100 @@ async function importDiagnostics(code: string): Promise<Diagnostic[]> {
   }
 }
 
-export async function lintTsx(code: string): Promise<Diagnostic[]> {
+// ---- Page link pass (anchor hrefs must resolve to an existing .tsx page) ----
+
+interface AnchorHref {
+  href: string;
+  line: number;
+  column: number;
+}
+
+function extractAnchorHrefs(node: AstNode, out: AnchorHref[]) {
+  if (node.type === "JSXOpeningElement") {
+    const name = node.name as AstNode | undefined;
+    if (name?.type === "JSXIdentifier" && name.name === "a") {
+      for (const attr of (node.attributes as AstNode[] | undefined) ?? []) {
+        if (attr.type !== "JSXAttribute") continue;
+        const attrName = attr.name as AstNode | undefined;
+        if (attrName?.name !== "href") continue;
+        const value = attr.value as AstNode | undefined;
+        const literal =
+          value?.type === "StringLiteral"
+            ? value
+            : value?.type === "JSXExpressionContainer" &&
+                (value.expression as AstNode | undefined)?.type === "StringLiteral"
+              ? (value.expression as AstNode)
+              : null;
+        if (!literal) continue;
+        const pos = (literal.loc as { start: Loc } | undefined)?.start ?? { line: 1, column: 0 };
+        out.push({ href: String(literal.value ?? ""), line: pos.line, column: pos.column + 1 });
+      }
+    }
+  }
+  for (const key in node) {
+    if (key === "loc" || key === "start" || key === "end" || key === "leadingComments" || key === "trailingComments") continue;
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const c of child) {
+        if (c && typeof c === "object" && typeof (c as AstNode).type === "string") extractAnchorHrefs(c as AstNode, out);
+      }
+    } else if (child && typeof child === "object" && typeof (child as AstNode).type === "string") {
+      extractAnchorHrefs(child as AstNode, out);
+    }
+  }
+}
+
+async function linkDiagnostics(code: string, currentPath: string | null): Promise<Diagnostic[]> {
+  try {
+    const { parse } = await import("@babel/parser");
+    const ast = parse(code, PARSE_OPTIONS);
+    const anchors: AnchorHref[] = [];
+    extractAnchorHrefs(ast.program as unknown as AstNode, anchors);
+
+    const out: Diagnostic[] = [];
+    for (const { href, line, column } of anchors) {
+      if (!href || href.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(href)) continue;
+      const candidates = resolveLinkCandidates(currentPath, href);
+      if (!candidates.length) {
+        out.push({
+          severity: "warning",
+          line,
+          column,
+          source: "links",
+          message: `<a href="${href}"> is not a page link — only .tsx pages can be linked, so clicking it will do nothing.`,
+        });
+        continue;
+      }
+      let found = false;
+      for (const segments of candidates) {
+        if (await resolvePagePath(segments)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        out.push({
+          severity: "error",
+          line,
+          column,
+          source: "links",
+          message: `Broken link: "${href}" does not match any page (looked for ${candidates.map((c) => c.join("/")).join(", ")}).`,
+        });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export async function lintTsx(code: string, currentPath: string | null = null): Promise<Diagnostic[]> {
   if (!code.trim()) return [];
-  const [ts, hooks, imports] = await Promise.all([
+  const [ts, hooks, imports, links] = await Promise.all([
     tsDiagnostics(code),
     hooksDiagnostics(code),
     importDiagnostics(code),
+    linkDiagnostics(code, currentPath),
   ]);
-  return [...ts, ...hooks, ...imports].sort((a, b) => a.line - b.line || a.column - b.column);
+  return [...ts, ...hooks, ...imports, ...links].sort((a, b) => a.line - b.line || a.column - b.column);
 }

@@ -378,6 +378,18 @@ Every design you produce is a **TSX React component** that renders live on the c
 - Make it interactive and polished — use state and effects where they improve the design.
 - The canvas type-checks and lint-checks your code (TypeScript + react-hooks); write type-correct code and follow the rules of hooks.
 
+## Multi-page apps
+
+You can build multi-page applications: each page is its own \`.tsx\` file under \`Outputs/\` (each with its own \`App\` component), and pages link to each other with plain HTML anchor tags using clean URLs — **no \`.tsx\` extension in hrefs**. The canvas intercepts anchor clicks and renders the target page.
+
+- \`<a href="details">\` — renders \`details.tsx\` from the current page's folder (from \`Outputs/home.tsx\` it opens \`Outputs/details.tsx\`).
+- \`<a href="/admin/users">\` — a leading slash resolves from the \`Outputs\` root: \`Outputs/admin/users.tsx\`. Subfolders and \`../\` work as in URLs.
+- \`<a href="https://…">\` — external links open in a new browser tab.
+- Matching is case-insensitive (\`<a href="details">\` finds \`Details.tsx\`), but prefer lowercase filenames for pages.
+- Pages cannot pass props or state to each other — keep each page self-contained, and prefer a shared visual style across pages.
+- Write and lint every page, then call \`show_file\` on the entry page (e.g. \`Outputs/home.tsx\`). The user navigates by clicking; a Back button in the canvas toolbar returns to the previous page.
+- \`lint_file\` reports broken links as errors, so write pages in dependency order (or fix link errors by writing the missing page) before showing the app.
+
 ## Behaviour
 
 - Ask clarifying questions before generating large designs.
@@ -554,7 +566,7 @@ const lintFileTool = {
     const name = segments.pop()!;
     const file = await useFilesystemStore.getState().readFileAt(segments, name);
     const code = await file.text();
-    const diagnostics = await lintTsx(code);
+    const diagnostics = await lintTsx(code, path);
     if (diagnostics.length === 0) return `No problems in ${path}`;
     return diagnostics
       .map((d) => `${d.severity} ${d.line}:${d.column} [${d.source}] ${d.message}`)
