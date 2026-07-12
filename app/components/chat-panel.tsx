@@ -605,9 +605,17 @@ const listFilesTool = {
     path: z.string().optional().describe('Slash-separated path, e.g. "Uploads" or "Uploads/designs". Defaults to root.'),
   }),
   execute: async ({ path = "" }: { path?: string }) => {
-    const segments = path ? path.split("/").filter(Boolean) : [];
-    const entries = await useFilesystemStore.getState().listPath(segments);
-    const base = path ? `${path}/` : "";
+    const normalizedPath = path.split("/").filter(Boolean).join("/");
+    const segments = normalizedPath ? normalizedPath.split("/") : [];
+    let entries;
+    try {
+      entries = await useFilesystemStore.getState().listPath(segments);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "NotFoundError") throw new Error(`Directory ${JSON.stringify(normalizedPath || "/")} does not exist.`);
+      if (error instanceof DOMException && error.name === "TypeMismatchError") throw new Error(`Path ${JSON.stringify(normalizedPath)} is a file, not a directory.`);
+      throw error;
+    }
+    const base = normalizedPath ? `${normalizedPath}/` : "";
     return entries.map((e) =>
       e.kind === "file"
         ? { kind: "file", name: e.name, path: `${base}${e.name}`, size: e.size, mimeType: e.mimeType }

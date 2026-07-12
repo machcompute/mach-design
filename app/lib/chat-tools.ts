@@ -10,40 +10,6 @@ export interface FunctionToolDef {
   };
 }
 
-/**
- * Local OpenAI-compatible servers commonly implement only a small JSON Schema
- * subset for tools. Keep rich Zod validation in-app, but transmit just the
- * portable shape needed for tool selection.
- */
-const UNSUPPORTED_TOOL_SCHEMA_KEYWORDS = new Set([
-  "$schema",
-  "minLength",
-  "maxLength",
-  "minimum",
-  "maximum",
-  "exclusiveMinimum",
-  "exclusiveMaximum",
-  "minItems",
-  "maxItems",
-  "anyOf",
-  "oneOf",
-  "allOf",
-  "prefixItems",
-  "additionalProperties",
-  "propertyNames",
-  "enum",
-]);
-
-function withoutUnsupportedToolSchemaKeywords(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutUnsupportedToolSchemaKeywords);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !UNSUPPORTED_TOOL_SCHEMA_KEYWORDS.has(key))
-      .map(([key, nested]) => [key, key === "type" && nested === "integer" ? "number" : withoutUnsupportedToolSchemaKeywords(nested)])
-  );
-}
-
 export function toFunctionToolDefs(
   tools: ModelContext["tools"]
 ): FunctionToolDef[] | undefined {
@@ -55,7 +21,7 @@ export function toFunctionToolDefs(
       function: {
         name,
         description: t.description ?? "",
-        parameters: withoutUnsupportedToolSchemaKeywords(toJSONSchema(t.parameters!)) as Record<string, unknown>,
+        parameters: toJSONSchema(t.parameters!) as Record<string, unknown>,
       },
     }));
   return defs.length ? defs : undefined;

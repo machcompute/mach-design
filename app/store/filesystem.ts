@@ -33,10 +33,10 @@ interface FilesystemState {
   readFile: (name: string) => Promise<File>;
 }
 
-async function getDirAt(path: string[]): Promise<FileSystemDirectoryHandle> {
+async function getDirAt(path: string[], create = false): Promise<FileSystemDirectoryHandle> {
   let dir = await navigator.storage.getDirectory();
   for (const segment of path) {
-    dir = await dir.getDirectoryHandle(segment, { create: true });
+    dir = await dir.getDirectoryHandle(segment, { create });
   }
   return dir;
 }
@@ -67,7 +67,7 @@ export const useFilesystemStore = create<FilesystemState>()((set, get) => ({
   bump: () => set((s) => ({ version: s.version + 1 })),
 
   init: async () => {
-    await getDirAt(["Uploads"]);
+    await getDirAt(["Uploads"], true);
     const uploads = (await listDir(["Uploads"])).filter((e): e is FileEntry => e.kind === "file");
     set({ initialized: true, uploads });
   },
@@ -81,7 +81,7 @@ export const useFilesystemStore = create<FilesystemState>()((set, get) => ({
   },
 
   uploadFilesTo: async (path, files) => {
-    const dir = await getDirAt(path);
+    const dir = await getDirAt(path, true);
     await Promise.all(files.map(async (file) => {
       const handle = await dir.getFileHandle(file.name, { create: true });
       const writable = await handle.createWritable();
@@ -102,7 +102,7 @@ export const useFilesystemStore = create<FilesystemState>()((set, get) => ({
   },
 
   createDirAt: async (path, name) => {
-    const dir = await getDirAt(path);
+    const dir = await getDirAt(path, true);
     await dir.getDirectoryHandle(name, { create: true });
   },
 
