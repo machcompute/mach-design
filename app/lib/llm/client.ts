@@ -18,6 +18,7 @@ export interface EngineModel {
   label: string;
   modalities: EngineModality[];
   maxContext: number;
+  cached?: boolean | null;
 }
 
 export function modelHasVision(modalities: readonly string[] | undefined): boolean {

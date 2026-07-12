@@ -85,6 +85,7 @@ export default function SettingsWebGpuPanel() {
   const errorMessage = useEngineStore((s) => s.errorMessage);
   const deviceInfo = useEngineStore((s) => s.deviceInfo);
   const cacheKnown = useEngineStore((s) => s.cacheKnown);
+  const cacheModel = useEngineStore((s) => s.cacheModel);
   const hasMtp = useEngineStore((s) => s.hasMtp);
   const activeModel = useEngineStore((s) => s.activeModel);
   const availableModels = useEngineStore((s) => s.availableModels);
@@ -104,6 +105,8 @@ export default function SettingsWebGpuPanel() {
   const [gpuOk] = useState<boolean | null>(() => engine.checkGpu().ok);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [wiping, setWiping] = useState(false);
+  const selectedModelInfo = availableModels.find((model) => model.id === webgpuModel);
+  const selectedCacheKnown = selectedModelInfo?.cached ?? (cacheModel === webgpuModel ? cacheKnown : null);
 
   useEffect(() => {
     engine.probeCache();
@@ -115,9 +118,7 @@ export default function SettingsWebGpuPanel() {
   }, [webgpuBatchSize, webgpuMaxContext, webgpuMtpEnabled]);
 
   function handleLoadClick() {
-    // Confirm unless a cache is positively known to exist — a failed probe
-    // (cacheKnown === null) must not silently start an 8.4 GB download.
-    if (cacheKnown !== true) {
+    if (selectedCacheKnown !== true) {
       setConfirmOpen(true);
     } else {
       engine.loadModel().catch(() => {});
@@ -201,9 +202,9 @@ export default function SettingsWebGpuPanel() {
         )}
       </div>
 
-      {status !== "ready" && cacheKnown !== null && (
+      {status !== "ready" && selectedCacheKnown !== null && (
         <p className="text-xs text-mc-gray">
-          {cacheKnown
+          {selectedCacheKnown
             ? "Cached weights found — ready to load into GPU."
             : "No local cache — the selected model will be downloaded and prepared on first load."}
         </p>
@@ -349,7 +350,7 @@ export default function SettingsWebGpuPanel() {
           <AlertDialogHeader>
             <AlertDialogTitle>Download and prepare this model?</AlertDialogTitle>
             <AlertDialogDescription>
-              {cacheKnown === null
+              {selectedCacheKnown === null
                 ? "Couldn't verify a local cache (this can happen in private browsing). If no cache exists, loading will download and prepare the selected model."
                 : "No local cache was found. Loading will download and prepare the selected model, then cache it locally for future loads."}
             </AlertDialogDescription>

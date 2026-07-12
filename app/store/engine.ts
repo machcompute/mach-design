@@ -16,6 +16,7 @@ interface EngineState {
   errorMessage: string | null;
   deviceInfo: DeviceInfo | null;
   cacheKnown: boolean | null;
+  cacheModel: string | null;
   hasMtp: boolean;
   activeModel: string | null;
   availableModels: EngineModel[];
@@ -36,6 +37,7 @@ export const useEngineStore = create<EngineState>()((set) => ({
   errorMessage: null,
   deviceInfo: null,
   cacheKnown: null,
+  cacheModel: null,
   hasMtp: false,
   activeModel: null,
   availableModels: [],
