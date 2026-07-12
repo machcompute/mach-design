@@ -42,6 +42,7 @@ import {
   toFunctionToolDefs,
 } from "@/app/lib/chat-tools";
 import { localAdapter } from "@/app/lib/llm/adapter";
+import { engine } from "@/app/lib/llm/engine";
 import { useEngineStore } from "@/app/store/engine";
 import { modelHasVision } from "@/app/lib/llm/client";
 import {
@@ -948,7 +949,10 @@ function ClearButton() {
   const thread = useThreadRuntime();
   return (
     <button
-      onClick={() => thread.reset()}
+      onClick={() => {
+        thread.reset();
+        engine.resetContextUsage();
+      }}
       className="flex items-center gap-1 text-xs text-mc-gray hover:text-mc-dark transition-colors"
       title="Clear chat"
     >

@@ -56,6 +56,10 @@ class EngineController {
     });
   }
 
+  resetContextUsage(): void {
+    this.setState({ contextUsedTokens: 0 });
+  }
+
   applyRuntimeSettings(): WebGpuRuntimeSettings {
     const settings = normalizeWebGpuSettings(useSettingsStore.getState());
     if (this.ready) {
