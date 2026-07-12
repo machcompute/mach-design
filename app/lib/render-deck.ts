@@ -24,7 +24,7 @@ export interface DeckPreviewOptions {
   imageSources?: Record<string, string | undefined>;
   /** A small label shown only when an image asset cannot be resolved. */
   missingImageLabel?: string;
-  textScale?: number;
+  showPlaceholders?: boolean;
 }
 
 function escapeHtml(value: string): string {
@@ -72,10 +72,22 @@ function strokeCss(stroke: DeckStroke | undefined, deck: SlideDeck): string {
   return `border:${Math.max(0, stroke.width ?? 1)}px ${style} ${cssValue(colorWithOpacity(resolveDeckColor(stroke.color, deck.theme), stroke.opacity))};`;
 }
 
-function textCss(style: TextStyle, deck: SlideDeck, scale = 1): string {
+function slideWidthPixels(deck: SlideDeck): number {
+  return Math.max(1, deck.size.width * 96);
+}
+
+function responsivePoints(value: number, deck: SlideDeck): string {
+  return `${value * (4 / 3) * 100 / slideWidthPixels(deck)}cqw`;
+}
+
+function responsivePixels(value: number, deck: SlideDeck): string {
+  return `${value * 100 / slideWidthPixels(deck)}cqw`;
+}
+
+function textCss(style: TextStyle, deck: SlideDeck): string {
   const margin = Array.isArray(style.margin)
-    ? style.margin.map((part) => `${part * scale}px`).join(" ")
-    : `${(style.margin ?? 0) * scale}px`;
+    ? style.margin.map((part) => responsivePoints(part, deck)).join(" ")
+    : responsivePoints(style.margin ?? 0, deck);
   const vertical = style.verticalAlign === "middle" ? "center" : style.verticalAlign === "bottom" ? "flex-end" : "flex-start";
   return [
     "display:flex;",
@@ -83,12 +95,12 @@ function textCss(style: TextStyle, deck: SlideDeck, scale = 1): string {
     `justify-content:${vertical};`,
     `text-align:${style.align ?? "left"};`,
     `font-family:${cssValue(style.fontFamily ?? deck.theme.fonts.body ?? "sans-serif")};`,
-    `font-size:${Math.max(1, (style.fontSize ?? 18) * scale)}pt;`,
+    `font-size:${responsivePoints(style.fontSize ?? 18, deck)};`,
     `font-weight:${style.bold ? 700 : 400};`,
     `font-style:${style.italic ? "italic" : "normal"};`,
     `text-decoration:${style.underline ? "underline" : "none"};`,
     `line-height:${style.lineSpacing ?? 1.2};`,
-    `letter-spacing:${(style.letterSpacing ?? 0) * scale}px;`,
+    `letter-spacing:${responsivePixels(style.letterSpacing ?? 0, deck)};`,
     `color:${cssValue(resolveDeckColor(style.color, deck.theme, "#111827"))};`,
     `padding:${margin};`,
     "white-space:pre-wrap;overflow:hidden;",
@@ -146,11 +158,11 @@ function renderElement(element: SlideElement, deck: SlideDeck, options: DeckPrev
   const common = `${interactive ? `data-mach-element-id="${escapeHtml(element.id)}" data-mach-element-type="${element.type}" ` : ""}style="${boxCss(element)}`;
   if (element.type === "text") {
     const style = getEffectiveTextStyle(element, deck);
-    return `<div ${common}${fillCss(element.fill, deck)}${strokeCss(element.stroke, deck)}${textCss(style, deck, options.textScale)}">${escapeHtml(element.text)}</div>`;
+    return `<div ${common}${fillCss(element.fill, deck)}${strokeCss(element.stroke, deck)}${textCss(style, deck)}">${escapeHtml(element.text)}</div>`;
   }
   if (element.type === "shape") {
     const style = element.text ? getEffectiveTextStyle(element, deck) : undefined;
-    const text = element.text ? `<span style="position:relative;z-index:1;width:100%;height:100%;box-sizing:border-box;${textCss(style!, deck, options.textScale)}">${escapeHtml(element.text)}</span>` : "";
+    const text = element.text ? `<span style="position:relative;z-index:1;width:100%;height:100%;box-sizing:border-box;${textCss(style!, deck)}">${escapeHtml(element.text)}</span>` : "";
     return `<div ${common}${fillCss(element.fill, deck)}${strokeCss(element.stroke, deck)}${shapeCss(element)}">${text}</div>`;
   }
   if (element.type === "image") {
@@ -171,25 +183,50 @@ function renderElement(element: SlideElement, deck: SlideDeck, options: DeckPrev
   return renderLine(element, deck, interactive);
 }
 
+function renderPlaceholder(id: string, label: string, box: SlideElement["box"]): string {
+  return `<button type="button" data-mach-placeholder-id="${escapeHtml(id)}" style="position:absolute;box-sizing:border-box;left:${percent(box.x)};top:${percent(box.y)};width:${percent(box.width)};height:${percent(box.height)};border:1.5px dashed rgba(41,52,144,.55);background:rgba(184,179,233,.08);color:#293490;font:10px sans-serif;text-align:left;padding:4px;overflow:hidden;cursor:text;">${escapeHtml(label)}</button>`;
+}
+
+function sameBox(left: SlideElement["box"], right: SlideElement["box"]): boolean {
+  return Math.abs(left.x - right.x) < 0.05
+    && Math.abs(left.y - right.y) < 0.05
+    && Math.abs(left.width - right.width) < 0.05
+    && Math.abs(left.height - right.height) < 0.05;
+}
+
 export function buildDeckPreviewHtml(deck: SlideDeck, slideIndex: number, options: DeckPreviewOptions = {}): string {
   const slide: Slide | undefined = deck.slides[slideIndex];
   if (!slide) {
     return `<!doctype html><html><body style="margin:0;font:14px sans-serif;display:grid;place-items:center;height:100vh;color:#6B7280">Slide not found</body></html>`;
   }
   const background = getSlideBackground(slide, deck);
-  const templateElements = sortSlideElements(getSlideTemplateElements(slide, deck));
+  const layout = deck.template?.manifest.layouts.find((item) => item.id === slide.layoutId);
+  const placeholderBoxes = (layout?.placeholders ?? []).flatMap((placeholder) => placeholder.box ? [placeholder.box] : []);
+  const templateElements = sortSlideElements(getSlideTemplateElements(slide, deck)).map((element) => {
+    if (element.type !== "shape" || !element.text || !placeholderBoxes.some((box) => sameBox(element.box, box))) return element;
+    return { ...element, text: undefined };
+  });
   const templateHtml = templateElements.map((element) => renderElement(element, deck, options, false)).join("\n");
   const contentHtml = sortSlideElements(slide.elements).map((element) => renderElement(element, deck, options)).join("\n");
+  const boundPlaceholders = new Set(slide.elements.map((element) => element.placeholderId).filter(Boolean));
+  const placeholderHtml = options.showPlaceholders
+    ? (layout?.placeholders ?? [])
+      .filter((placeholder) => placeholder.box && !boundPlaceholders.has(placeholder.id) && !["pic", "ftr", "dt", "sldNum", "hdr"].includes(placeholder.type ?? ""))
+      .map((placeholder) => renderPlaceholder(placeholder.id, placeholder.name ?? placeholder.type ?? "Text placeholder", placeholder.box!))
+      .join("\n")
+    : "";
   return `<!doctype html>
 <html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <style>
   html,body{height:100%;margin:0}body{background:#EEF0F3;display:grid;place-items:center;overflow:hidden}
-  #mach-slide{position:relative;box-sizing:border-box;width:min(100vw,calc(100vh * ${deck.size.width / deck.size.height}));aspect-ratio:${deck.size.width}/${deck.size.height};overflow:hidden;box-shadow:0 10px 30px rgba(15,23,42,.18);}
-  #mach-template-layer,#mach-content-layer{position:absolute;inset:0;isolation:isolate}
+  #mach-slide{position:relative;box-sizing:border-box;width:min(100vw,calc(100vh * ${deck.size.width / deck.size.height}));aspect-ratio:${deck.size.width}/${deck.size.height};container-type:inline-size;overflow:hidden;box-shadow:0 10px 30px rgba(15,23,42,.18);}
+  #mach-template-layer,#mach-content-layer,#mach-placeholder-layer{position:absolute;inset:0;isolation:isolate}
   #mach-template-layer{z-index:0;pointer-events:none}
   #mach-content-layer{z-index:1}
+  #mach-placeholder-layer{z-index:2;pointer-events:none}
+  #mach-placeholder-layer [data-mach-placeholder-id]{pointer-events:auto}
   #mach-slide [data-mach-element-id]{min-width:0;min-height:0;}
 </style></head><body>
-<main id="mach-slide" data-mach-slide-id="${escapeHtml(slide.id)}" style="${fillCss(background, deck)}"><div id="mach-template-layer">${templateHtml}</div><div id="mach-content-layer">${contentHtml}</div></main>
+<main id="mach-slide" data-mach-slide-id="${escapeHtml(slide.id)}" style="${fillCss(background, deck)}"><div id="mach-template-layer">${templateHtml}</div><div id="mach-content-layer">${contentHtml}</div><div id="mach-placeholder-layer">${placeholderHtml}</div></main>
 </body></html>`;
 }

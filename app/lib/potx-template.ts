@@ -424,7 +424,7 @@ function semanticShapeElements(
     }
     const fillColor = kit.getShapeFillColorResolved(presentation, shape);
     const fillKind = kit.getShapeFillEffective(presentation, shape).kind;
-    const text = kit.getShapeText(shape);
+    const text = kit.isShapePlaceholder(shape) ? "" : kit.getShapeText(shape);
     const body = text ? kit.getShapeBodyPrEffective(presentation, shape) : null;
     output.push({
       ...common,
@@ -456,6 +456,50 @@ function semanticLayoutElements(
   const master = showMasterShapes ? semanticShapeElements(kit, presentation, kit.getSlideMasterShapes(presentation, layout), "master", slideWidthEmu, slideHeightEmu, warnings) : [];
   const local = semanticShapeElements(kit, presentation, kit.getSlideLayoutShapes(presentation, layout), "layout", slideWidthEmu, slideHeightEmu, warnings);
   return [...master, ...local].map((element, index) => ({ ...element, zIndex: index - master.length - local.length }));
+}
+
+function semanticLayoutPlaceholders(
+  kit: PptxKitModule,
+  presentation: PptxPresentation,
+  layout: PptxLayout,
+  slideWidthEmu: number,
+  slideHeightEmu: number,
+  theme: DeckTheme
+): TemplatePlaceholderManifest[] {
+  const slide = kit.addSlide(presentation, { layout });
+  try {
+    const usedIds = new Set<string>();
+    return kit.getSlideShapes(slide).filter((shape) => kit.isShapePlaceholder(shape)).flatMap((shape, index) => {
+      const bounds = kit.getShapeBoundsResolved(presentation, shape);
+      const normalized = bounds ? normalizedBounds(bounds, slideWidthEmu, slideHeightEmu) : null;
+      const type = kit.getShapePlaceholderType(shape) ?? "body";
+      const placeholderIndex = kit.getShapePlaceholderIdx(shape);
+      const baseId = `ph-${placeholderIndex ?? type ?? index + 1}`.replace(/[^A-Za-z0-9._:-]+/g, "-");
+      let id = baseId;
+      let duplicate = 2;
+      while (usedIds.has(id)) id = `${baseId}-${duplicate++}`;
+      usedIds.add(id);
+      const body = kit.getShapeBodyPrEffective(presentation, shape);
+      const isTitle = type === "title" || type === "ctrTitle" || type === "subTitle";
+      const margin = body?.margins
+        ? [body.margins.top ?? 0, body.margins.right ?? 0, body.margins.bottom ?? 0, body.margins.left ?? 0].map((value) => value / 12700) as [number, number, number, number]
+        : undefined;
+      return [{
+        id,
+        name: kit.getShapeName(shape) || undefined,
+        type,
+        ...(placeholderIndex !== null ? { index: String(placeholderIndex) } : {}),
+        ...(normalized ? { box: normalized.box } : {}),
+        textStyle: {
+          fontFamily: isTitle ? theme.fonts.heading : theme.fonts.body,
+          ...(body?.anchor ? { verticalAlign: body.anchor === "center" ? "middle" as const : body.anchor } : {}),
+          ...(margin ? { margin } : {}),
+        },
+      }];
+    });
+  } finally {
+    kit.removeSlide(presentation, slide);
+  }
 }
 
 function templateBackground(
@@ -775,7 +819,7 @@ export async function parsePotxTemplate(input: PotxInput, options: ParsePotxOpti
       const layoutVisuals = semanticVisuals === null
         ? parseVisualElements(xml, path, "layout", effectiveWidthEmu, effectiveHeightEmu, entries, strFromU8, -10_000)
         : semanticVisuals;
-      return [parseLayout(
+      const parsedLayout = parseLayout(
         xml,
         path,
         effectiveWidthEmu,
@@ -786,7 +830,13 @@ export async function parsePotxTemplate(input: PotxInput, options: ParsePotxOpti
         [...(layoutBackground.visuals.length ? layoutBackground.visuals : masterBackground.visuals), ...masterVisuals, ...layoutVisuals],
         masterPath?.split("/").pop()?.replace(/\.xml$/i, ""),
         layoutBackground.fill ?? masterBackground.fill
-      )];
+      );
+      return [{
+        ...parsedLayout,
+        ...(pptxKit && semanticPresentation && semanticLayout ? {
+          placeholders: semanticLayoutPlaceholders(pptxKit, semanticPresentation, semanticLayout, effectiveWidthEmu, effectiveHeightEmu, theme),
+        } : {}),
+      }];
     } catch {
       warnings.push(`Could not inspect layout ${path}; it was skipped.`);
       return [];

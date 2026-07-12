@@ -45,7 +45,7 @@ import { localAdapter } from "@/app/lib/llm/adapter";
 import { useEngineStore } from "@/app/store/engine";
 import { modelHasVision } from "@/app/lib/llm/client";
 import {
-  addImageElementTool, addLineElementTool, addShapeElementTool, addSlideTool, addTextElementTool,
+  addImageElementTool, addLineElementTool, addShapeElementTool, addSlideTool, addTextElementTool, fillTextPlaceholderTool,
   createPresentationOutlineTool, deleteSlideElementTool, deleteSlideTool, duplicateSlideTool,
   getDeckSummaryTool, getPresentationOutlineSlideTool, getPresentationOutlineTool, getSlideElementTool,
   getSlideIndexTool, getSlideLayoutTool, listSlideLayoutsTool, moveSlideTool, updateSlideElementTool, updateSlideTool,
@@ -926,6 +926,7 @@ function ChatTools({ provider }: { provider: "byok" | "webgpu" }) {
   useAssistantTool(moveSlideTool);
   useAssistantTool(deleteSlideTool);
   useAssistantTool(addTextElementTool);
+  useAssistantTool(fillTextPlaceholderTool);
   useAssistantTool(addShapeElementTool);
   useAssistantTool(addImageElementTool);
   useAssistantTool(addLineElementTool);

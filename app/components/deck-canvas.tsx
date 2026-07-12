@@ -171,11 +171,10 @@ export default function DeckCanvas() {
   useEffect(() => {
     if (!deck) return;
     let cancelled = false;
-    const slide = deck.slides[activeSlide];
-    if (!slide) return;
     void (async () => {
       const next: Record<string, string | undefined> = {};
-      await Promise.all(slide.elements.filter((element) => element.type === "image").map(async (element) => {
+      const images = deck.slides.flatMap((slide) => slide.elements.filter((element) => element.type === "image"));
+      await Promise.all(images.map(async (element) => {
         const asset = await resolveWorkspaceAsset(element.src);
         if (cancelled || !asset) return;
         next[element.id] = typeof asset === "string" ? asset : await fileToDataUrl(asset);
@@ -183,7 +182,7 @@ export default function DeckCanvas() {
       if (!cancelled) setImageSources(next);
     })();
     return () => { cancelled = true; };
-  }, [deck, activeSlide]);
+  }, [deck]);
 
   useEffect(() => {
     if (!deck) return;
@@ -201,11 +200,11 @@ export default function DeckCanvas() {
   useEffect(() => {
     if (!deck || !iframeRef.current) return;
     const iframe = iframeRef.current;
-    const html = buildDeckPreviewHtml(deck, activeSlide, { imageSources });
+    const html = buildDeckPreviewHtml(deck, activeSlide, { imageSources, showPlaceholders: editMode });
     const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
     iframe.src = url;
     return () => URL.revokeObjectURL(url);
-  }, [activeSlide, deck, frameKey, imageSources]);
+  }, [activeSlide, deck, editMode, frameKey, imageSources]);
 
   const clearSelection = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
@@ -245,9 +244,50 @@ export default function DeckCanvas() {
     };
   }, [activeSlide, changeSlide, deck]);
 
+  const activatePlaceholder = useCallback(async (placeholderId: string) => {
+    if (!deck) return;
+    const slide = deck.slides[activeSlide];
+    const layout = deck.template?.manifest.layouts.find((item) => item.id === slide?.layoutId);
+    const placeholder = layout?.placeholders.find((item) => item.id === placeholderId);
+    if (!slide || !placeholder?.box) return;
+    const usedIds = new Set(deck.slides.flatMap((item) => item.elements.map((element) => element.id)));
+    const baseId = `${slide.id}-${placeholder.id}`.replace(/[^A-Za-z0-9._:-]+/g, "-");
+    let id = baseId;
+    let duplicate = 2;
+    while (usedIds.has(id)) id = `${baseId}-${duplicate++}`;
+    const type = placeholder.type ?? "body";
+    const fontSize = type === "title" || type === "ctrTitle" ? 32 : type === "subTitle" ? 22 : 18;
+    const element: SlideElement = {
+      id,
+      type: "text",
+      name: placeholder.name ?? type,
+      box: placeholder.box,
+      text: "",
+      placeholderId,
+      style: { ...placeholder.textStyle, fontSize },
+    };
+    const nextDeck: SlideDeck = {
+      ...deck,
+      metadata: { ...deck.metadata, updatedAt: new Date().toISOString() },
+      slides: deck.slides.map((item, index) => index === activeSlide ? { ...item, elements: [...item.elements, element] } : item),
+    };
+    try {
+      await persist(nextDeck);
+      setSelectedElementId(id);
+    } catch (error) {
+      toast.error(`Could not add placeholder text: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [activeSlide, deck, persist]);
+
   const selectFromIframe = useCallback((event: MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    const placeholderTarget = (event.target as Element | null)?.closest?.("[data-mach-placeholder-id]") as HTMLElement | null;
+    const placeholderId = placeholderTarget?.dataset.machPlaceholderId;
+    if (placeholderId) {
+      void activatePlaceholder(placeholderId);
+      return;
+    }
     const target = (event.target as Element | null)?.closest?.("[data-mach-element-id]") as HTMLElement | null;
     const doc = iframeRef.current?.contentDocument;
     if (!target || !doc) return;
@@ -261,7 +301,7 @@ export default function DeckCanvas() {
     }
     style.textContent = `[data-mach-element-id="${CSS.escape(id)}"]{outline:2px solid #B8B3E9!important;outline-offset:2px}`;
     setSelectedElementId(id);
-  }, []);
+  }, [activatePlaceholder]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -288,8 +328,8 @@ export default function DeckCanvas() {
   }, [editMode, selectFromIframe]);
 
   const thumbnailHtml = useMemo(
-    () => deck?.slides.map((_, index) => buildDeckPreviewHtml(deck, index, { textScale: 0.14 })) ?? [],
-    [deck]
+    () => deck?.slides.map((_, index) => buildDeckPreviewHtml(deck, index, { imageSources })) ?? [],
+    [deck, imageSources]
   );
 
   if (!deck) {

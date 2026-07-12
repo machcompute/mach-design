@@ -86,6 +86,7 @@ export interface TemplatePlaceholderManifest {
   type?: string;
   index?: string;
   box?: NormalizedBox;
+  textStyle?: TextStyle;
   required?: boolean;
 }
 
@@ -535,6 +536,7 @@ function normalizePlaceholder(value: unknown, fallbackId: string, issues: DeckNo
     ...(typeof input.type === "string" && input.type.trim() ? { type: input.type.trim() } : {}),
     ...(input.index !== undefined || input.idx !== undefined ? { index: String(input.index ?? input.idx) } : {}),
     ...(input.box !== undefined ? { box: normalizeBox(input.box, issues, `${path}.box`) } : {}),
+    ...(input.textStyle !== undefined ? { textStyle: normalizeTextStyle(input.textStyle, issues, `${path}.textStyle`) } : {}),
     ...(input.required !== undefined ? { required: readBoolean(input.required, false, issues, `${path}.required`) } : {}),
   };
 }
