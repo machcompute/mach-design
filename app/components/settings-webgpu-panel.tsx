@@ -7,6 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -79,7 +86,10 @@ export default function SettingsWebGpuPanel() {
   const deviceInfo = useEngineStore((s) => s.deviceInfo);
   const cacheKnown = useEngineStore((s) => s.cacheKnown);
   const hasMtp = useEngineStore((s) => s.hasMtp);
+  const activeModel = useEngineStore((s) => s.activeModel);
+  const availableModels = useEngineStore((s) => s.availableModels);
   const generating = useEngineStore((s) => s.generating);
+  const webgpuModel = useSettingsStore((s) => s.webgpuModel);
   const contextUsedTokens = useEngineStore((s) => s.contextUsedTokens);
   const contextMaxTokens = useEngineStore((s) => s.contextMaxTokens);
   const webgpuMaxContext = useSettingsStore((s) => s.webgpuMaxContext);
@@ -97,6 +107,7 @@ export default function SettingsWebGpuPanel() {
 
   useEffect(() => {
     engine.probeCache();
+    engine.refreshModels().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -128,6 +139,7 @@ export default function SettingsWebGpuPanel() {
   }
 
   const busy = status === "loading";
+  const modelChanged = status === "ready" && !!activeModel && activeModel !== webgpuModel;
   const contextChanged = status === "ready" && contextMaxTokens > 0 && contextMaxTokens !== webgpuMaxContext;
   const contextPct = contextMaxTokens > 0 ? Math.round((contextUsedTokens / contextMaxTokens) * 100) : 0;
 
@@ -162,17 +174,44 @@ export default function SettingsWebGpuPanel() {
 
       {errorMessage && <p className="text-xs text-red-500">{errorMessage}</p>}
 
+      <div className="space-y-1.5">
+        <Label htmlFor="webgpu-model" className="text-xs text-mc-gray">
+          Model
+        </Label>
+        <Select
+          value={webgpuModel || undefined}
+          onValueChange={(v) => v && setSettings({ webgpuModel: v })}
+          disabled={busy}
+        >
+          <SelectTrigger id="webgpu-model" className="text-sm">
+            <SelectValue placeholder="Select a model" />
+          </SelectTrigger>
+          <SelectContent>
+            {availableModels.map((model) => (
+              <SelectItem key={model.id} value={model.id} className="text-sm">
+                {model.label || model.id} · {model.modalities.join(", ")} · {model.maxContext.toLocaleString()} ctx
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {!availableModels.length && <p className="text-xs text-mc-gray">Connecting to the WebGPU engine to load available models…</p>}
+        {availableModels.length > 0 && !webgpuModel && <p className="text-xs text-amber-600">Select a model before loading it.</p>}
+        {modelChanged && (
+          <p className="text-xs text-amber-600">Reload the model to switch to the selected model.</p>
+        )}
+      </div>
+
       {status !== "ready" && cacheKnown !== null && (
         <p className="text-xs text-mc-gray">
           {cacheKnown
-            ? "Cached weights found (~3 GB) — ready to load into GPU."
-            : "No local cache — first load downloads ~8.4 GB from Hugging Face and quantizes to ~3 GB (one-time)."}
+            ? "Cached weights found — ready to load into GPU."
+            : "No local cache — the selected model will be downloaded and prepared on first load."}
         </p>
       )}
 
       <Button
         onClick={handleLoadClick}
-        disabled={busy || generating || gpuOk === false}
+        disabled={busy || generating || gpuOk === false || !webgpuModel}
         className="w-full bg-mc-dark text-white hover:bg-mc-dark/85 rounded-full font-medium text-sm transition-colors"
       >
         {status === "ready" ? "Reload Model" : "Load Model"}
@@ -308,11 +347,11 @@ export default function SettingsWebGpuPanel() {
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Download ~8.4 GB?</AlertDialogTitle>
+            <AlertDialogTitle>Download and prepare this model?</AlertDialogTitle>
             <AlertDialogDescription>
               {cacheKnown === null
-                ? "Couldn't verify a local cache (this can happen in private browsing). If none exists, loading the model will download about 8.4 GB from Hugging Face and quantize it to roughly 3 GB."
-                : "No local cache was found. Loading the model will download about 8.4 GB from Hugging Face and quantize it to roughly 3 GB, cached locally for future loads."}
+                ? "Couldn't verify a local cache (this can happen in private browsing). If no cache exists, loading will download and prepare the selected model."
+                : "No local cache was found. Loading will download and prepare the selected model, then cache it locally for future loads."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

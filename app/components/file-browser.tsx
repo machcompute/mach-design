@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Folder, FolderOpen, File, FileText, FileImage, FileCode,
-  Upload, Trash2, ChevronRight, Home,
+  Upload, Trash2, ChevronRight, Home, Presentation,
 } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,6 +20,9 @@ import {
 import { useFilesystemStore, type Entry, type FileEntry } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useWorkspaceStore } from "@/app/store/workspace";
+import { useChatBridgeStore } from "@/app/store/chat-bridge";
+import { normalizeDeck } from "@/app/lib/slides";
+import { parsePotxTemplate } from "@/app/lib/potx-template";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -29,6 +32,7 @@ function formatSize(bytes: number): string {
 
 function entryIcon(entry: Entry, className = "w-4 h-4") {
   if (entry.kind === "directory") return <Folder className={`${className} text-mc-lime`} style={{ fill: "#DEEFB7" }} />;
+  if (/\.(potx|pptx|slides\.json|deck\.json)$/i.test(entry.name)) return <Presentation className={`${className} text-mc-lavender`} />;
   const mime = entry.mimeType;
   if (mime.startsWith("image/")) return <FileImage className={`${className} text-mc-mint`} />;
   if (mime.startsWith("text/") || mime === "application/json") return <FileText className={`${className} text-mc-lavender`} />;
@@ -64,7 +68,7 @@ function Breadcrumb({ path, onNavigate }: { path: string[]; onNavigate: (idx: nu
   );
 }
 
-function FilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
+function GenericFilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
   const readFileAt = useFilesystemStore((s) => s.readFileAt);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -117,6 +121,123 @@ function FilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
       </div>
     </div>
   );
+}
+
+function isSlideDeck(entry: Entry): entry is FileEntry {
+  return entry.kind === "file" && /\.(slides|deck)\.json$/i.test(entry.name);
+}
+
+function isPotxTemplate(entry: Entry): entry is FileEntry {
+  return entry.kind === "file" && /\.potx$/i.test(entry.name);
+}
+
+function TemplatePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
+  const readFileAt = useFilesystemStore((state) => state.readFileAt);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<{ name: string; size: string; layouts: Array<{ id: string; name: string; placeholders: number }>; warnings: string[] } | null>(null);
+  const pathKey = path.join("/");
+  const fullPath = [...path, entry.name].join("/");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const file = await readFileAt(path, entry.name);
+        const manifest = await parsePotxTemplate(file, { fileName: entry.name });
+        if (!cancelled) {
+          setSummary({
+            name: manifest.name,
+            size: `${manifest.slideSize.width.toFixed(2)} × ${manifest.slideSize.height.toFixed(2)} in`,
+            layouts: manifest.layouts.map((layout) => ({ id: layout.id, name: layout.name, placeholders: layout.placeholders.length })),
+            warnings: manifest.warnings ?? [],
+          });
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [entry.name, path, pathKey, readFileAt]);
+
+  function useInChat() {
+    useChatBridgeStore.getState().setReference({
+      label: `${entry.name} · slide template`,
+      kind: "template",
+      content: `Use the uploaded PowerPoint template \`${fullPath}\` to generate a slide deck. First call \`inspect_potx_template\` on it, then create and lint a template-bound slide deck.\n\n`,
+    });
+    document.querySelector<HTMLTextAreaElement>(".aui-composer-input")?.focus();
+  }
+
+  return (
+    <div className="h-full overflow-auto border-t border-mc-gray/15 bg-white">
+      <div className="flex items-center gap-2 border-b border-mc-gray/15 px-4 py-2">
+        <Presentation className="size-3.5 text-mc-lavender" />
+        <span className="truncate text-xs font-medium text-mc-dark">{entry.name}</span>
+        <span className="ml-auto shrink-0 font-mono text-xs text-mc-gray/50">{formatSize(entry.size)}</span>
+      </div>
+      {loading ? <p className="p-4 font-mono text-xs text-mc-gray">Inspecting template…</p> : error ? (
+        <p className="p-4 text-xs text-red-500">Could not inspect this POTX: {error}</p>
+      ) : summary && (
+        <div className="space-y-4 p-4">
+          <div>
+            <p className="text-sm font-medium text-mc-dark">{summary.name}</p>
+            <p className="mt-1 text-xs text-mc-gray">{summary.size} · {summary.layouts.length} layouts</p>
+          </div>
+          <button onClick={useInChat} className="rounded bg-mc-lavender/20 px-3 py-1.5 text-xs font-semibold text-mc-dark hover:bg-mc-lavender/30">
+            Use template in chat
+          </button>
+          <div className="space-y-1.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-mc-gray/60">Layouts</p>
+            {summary.layouts.map((layout) => <div key={layout.id} className="rounded border border-mc-gray/15 px-2 py-1.5 text-xs text-mc-dark"><span className="font-mono text-mc-gray">{layout.id}</span> · {layout.name} <span className="text-mc-gray">({layout.placeholders} placeholders)</span></div>)}
+          </div>
+          {summary.warnings.length > 0 && <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">{summary.warnings.join(" ")}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlideDeckPreview({ entry, path }: { entry: FileEntry; path: string[] }) {
+  const readFileAt = useFilesystemStore((state) => state.readFileAt);
+  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState<{ name: string; slides: number; issues: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pathKey = path.join("/");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      setLoading(true);
+      try {
+        const file = await readFileAt(path, entry.name);
+        const parsed = normalizeDeck(await file.text());
+        if (!cancelled) setSummary({ name: parsed.deck.name, slides: parsed.deck.slides.length, issues: parsed.issues.length });
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [entry.name, path, pathKey, readFileAt]);
+
+  return (
+    <div className="h-full overflow-auto border-t border-mc-gray/15 bg-white">
+      <div className="flex items-center gap-2 border-b border-mc-gray/15 px-4 py-2"><Presentation className="size-3.5 text-mc-lavender" /><span className="truncate text-xs font-medium text-mc-dark">{entry.name}</span></div>
+      {loading ? <p className="p-4 font-mono text-xs text-mc-gray">Reading deck…</p> : error ? <p className="p-4 text-xs text-red-500">Could not read this slide deck: {error}</p> : summary && <div className="space-y-1 p-4"><p className="text-sm font-medium text-mc-dark">{summary.name}</p><p className="text-xs text-mc-gray">{summary.slides} slides{summary.issues ? ` · ${summary.issues} normalization issues` : ""}</p></div>}
+    </div>
+  );
+}
+
+function FilePreview({ entry, path }: { entry: FileEntry; path: string[] }) {
+  if (isPotxTemplate(entry)) return <TemplatePreview entry={entry} path={path} />;
+  if (isSlideDeck(entry)) return <SlideDeckPreview entry={entry} path={path} />;
+  return <GenericFilePreview entry={entry} path={path} />;
 }
 
 function isComponent(entry: Entry) {
@@ -218,9 +339,13 @@ export default function FileBrowser() {
 
   useEffect(() => {
     if (version === 0) return;
-    refresh(path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version]);
+    // A filesystem import can happen outside this component (for example from
+    // the workspace ZIP menu). Defer the refresh to the next frame so this
+    // effect subscribes to that external signal rather than synchronously
+    // triggering a render while React is committing it.
+    const frame = requestAnimationFrame(() => { void refresh(path); });
+    return () => cancelAnimationFrame(frame);
+  }, [version, path, refresh]);
 
   function navigateTo(idx: number) {
     const next = idx === -1 ? [] : path.slice(0, idx + 1);
@@ -239,8 +364,13 @@ export default function FileBrowser() {
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     if (!files.length) return;
-    await uploadFilesTo(path, files);
-    await refresh(path);
+    // User-supplied files are always stored in the dedicated read-only-to-the-
+    // agent Uploads folder, regardless of which workspace folder is open.
+    const uploadsPath = ["Uploads"];
+    await uploadFilesTo(uploadsPath, files);
+    setPath(uploadsPath);
+    setSelected(null);
+    await refresh(uploadsPath);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -312,6 +442,12 @@ export default function FileBrowser() {
                       const file = await readFileAt(path, entry.name);
                       const fullPath = [...path, entry.name].join("/");
                       useCanvasStore.getState().setCode(await file.text(), fullPath);
+                      useWorkspaceStore.getState().setActiveTab("canvas");
+                    } : isSlideDeck(entry) ? async () => {
+                      const file = await readFileAt(path, entry.name);
+                      const fullPath = [...path, entry.name].join("/");
+                      const parsed = normalizeDeck(await file.text());
+                      useCanvasStore.getState().setDeck(parsed.deck, fullPath);
                       useWorkspaceStore.getState().setActiveTab("canvas");
                     } : undefined}
                   />

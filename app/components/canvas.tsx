@@ -12,14 +12,16 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
-import { useCanvasStore } from "@/app/store/canvas";
+import { LAST_DECK_PATH_KEY, useCanvasStore } from "@/app/store/canvas";
 import { useFilesystemStore, type Entry } from "@/app/store/filesystem";
+import { normalizeDeck } from "@/app/lib/slides";
 import { PAGES_ROOT, resolveLinkCandidates, readPage } from "@/app/lib/page-links";
 import { transpileTsx, buildPreviewHtml, buildStandaloneHtml, type StandalonePage } from "@/app/lib/render-tsx";
 import { instrumentForEditing, applyEdits, deleteNode, describeNode, getNodeSource, type NodeInfo, type NodeEdits } from "@/app/lib/instrument-tsx";
 import { lintTsx, type Diagnostic } from "@/app/lib/lint-tsx";
 import { useChatBridgeStore } from "@/app/store/chat-bridge";
 import CanvasInspector from "./canvas-inspector";
+import DeckCanvas from "./deck-canvas";
 
 async function collectOutputsPages(): Promise<Array<{ key: string; code: string }>> {
   const store = useFilesystemStore.getState();
@@ -155,7 +157,7 @@ function ProblemsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
   );
 }
 
-export default function Canvas() {
+function TsxCanvas() {
   const { code, path, history, setCode, clear } = useCanvasStore();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [showCode, setShowCode] = useState(false);
@@ -602,4 +604,41 @@ export default function Canvas() {
       </div>
     </div>
   );
+}
+
+/**
+ * The workspace can host either the existing TSX app canvas or a canonical
+ * presentation deck. Keeping each renderer in its own component preserves
+ * React's hook ordering while both modes share the same canvas tab/store.
+ */
+export default function Canvas() {
+  const kind = useCanvasStore((state) => state.kind);
+  const deck = useCanvasStore((state) => state.deck);
+  const setDeck = useCanvasStore((state) => state.setDeck);
+
+  // Fast Refresh replaces this in-memory store during development. The deck
+  // itself is saved in the workspace, so reopen its path automatically rather
+  // than leaving the canvas blank after a refresh.
+  useEffect(() => {
+    if (kind === "deck" || deck || typeof window === "undefined") return;
+    const path = window.sessionStorage.getItem(LAST_DECK_PATH_KEY);
+    if (!path) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const parts = path.split("/").filter(Boolean);
+        const name = parts.pop();
+        if (!name) return;
+        const file = await useFilesystemStore.getState().readFileAt(parts, name);
+        const parsed = normalizeDeck(await file.text());
+        if (!cancelled) setDeck(parsed.deck, path);
+      } catch {
+        // Remove stale paths so an intentionally deleted deck is not retried.
+        window.sessionStorage.removeItem(LAST_DECK_PATH_KEY);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [deck, kind, setDeck]);
+
+  return kind === "deck" ? <DeckCanvas /> : <TsxCanvas />;
 }

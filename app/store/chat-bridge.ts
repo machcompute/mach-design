@@ -3,6 +3,8 @@ import { create } from "zustand";
 export interface ElementReference {
   label: string;
   content: string;
+  /** Lets the thread render the compact history pill without parsing content. */
+  kind?: "element" | "template";
 }
 
 interface ChatBridgeState {

@@ -10,8 +10,25 @@ export interface EngineDeviceInfo {
   vramBytes: number;
 }
 
+export type EngineModality = "text" | "image" | "audio" | "video";
+
+export interface EngineModel {
+  id: string;
+  object: "model";
+  label: string;
+  modalities: EngineModality[];
+  maxContext: number;
+}
+
+export function modelHasVision(modalities: readonly string[] | undefined): boolean {
+  return !!modalities?.some((m) => m === "image" || m === "video");
+}
+
 export interface EngineStatusInfo {
   model: string;
+  activeModel: string;
+  availableModels: EngineModel[];
+  modalities: EngineModality[];
   webgpu: boolean;
   adapter: boolean;
   cached: boolean | null;
@@ -32,12 +49,18 @@ export interface EngineToolCall {
   };
 }
 
+export type EngineContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" | "auto" } };
+
 export type EngineChatMessage =
-  | { role: "system" | "user"; content: string }
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | EngineContentPart[] }
   | { role: "assistant"; content: string; tool_calls?: EngineToolCall[] }
   | { role: "tool"; content: string; tool_call_id?: string };
 
 export interface EngineCompletionParams {
+  model?: string;
   messages: EngineChatMessage[];
   tools?: unknown[];
   parallel_tool_calls?: boolean;
@@ -89,14 +112,16 @@ export interface EngineStream extends AsyncIterable<EngineChunk> {
 
 export interface MachLLMClient {
   status(): Promise<EngineStatusInfo>;
+  models: { list(): Promise<{ object: "list"; data: EngineModel[] }> };
   load(options?: {
+    model?: string;
     maxContext?: number;
     batchSize?: number;
     mtp?: boolean;
     reload?: boolean;
   }): Promise<EngineStatusInfo>;
   updateSettings(options?: { batchSize?: number; mtp?: boolean }): Promise<EngineStatusInfo>;
-  wipeCache(): Promise<{ wiped: boolean }>;
+  wipeCache(options?: { model?: string }): Promise<{ wiped: boolean }>;
   close(): void;
   on(event: "progress", handler: (p: EngineProgress) => void): MachLLMClient;
   off(event: "progress", handler: (p: EngineProgress) => void): MachLLMClient;

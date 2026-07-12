@@ -76,12 +76,18 @@ class EngineController {
     try {
       const llm = await this.getClient();
       const status = await llm.status();
-      this.setState({ cacheKnown: status.cached });
+      this.setState({ cacheKnown: status.cached, availableModels: status.availableModels });
       return status.cached === true;
     } catch {
       this.setState({ cacheKnown: null });
       return false;
     }
+  }
+
+  async refreshModels(): Promise<void> {
+    const llm = await this.getClient();
+    const [{ data }, status] = await Promise.all([llm.models.list(), llm.status()]);
+    this.setState({ availableModels: data.length ? data : status.availableModels, cacheKnown: status.cached });
   }
 
   async loadModel(): Promise<void> {
@@ -106,7 +112,16 @@ class EngineController {
 
     try {
       const llm = await this.getClient();
+      const beforeLoad = await llm.status();
+      const selectedModel = useSettingsStore.getState().webgpuModel;
+      if (!selectedModel) throw new Error("Choose a WebGPU model before loading it.");
+      const listedModels = (await llm.models.list()).data;
+      const availableModels = listedModels.length ? listedModels : beforeLoad.availableModels;
+      if (!availableModels.some((model) => model.id === selectedModel)) {
+        throw new Error(`The selected WebGPU model ${JSON.stringify(selectedModel)} is not available from this engine.`);
+      }
       const status = await llm.load({
+        model: selectedModel,
         maxContext: settings.webgpuMaxContext,
         batchSize: settings.webgpuBatchSize,
         mtp: settings.webgpuMtpEnabled,
@@ -118,6 +133,9 @@ class EngineController {
         progressFrac: 1,
         hasMtp: status.hasMtp,
         cacheKnown: status.cached,
+        activeModel: status.activeModel,
+        availableModels: status.availableModels.length ? status.availableModels : availableModels,
+        modalities: status.modalities,
         contextUsedTokens: status.contextUsedTokens,
         contextMaxTokens: status.contextMaxTokens,
         deviceInfo: status.device,

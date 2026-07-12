@@ -47,6 +47,7 @@ import {
   RefreshCwIcon,
   SquareIcon,
   Code2Icon,
+  PresentationIcon,
   XIcon,
 } from "lucide-react";
 import type { FC } from "react";
@@ -58,9 +59,10 @@ const ReferencePill: FC = () => {
   const reference = useChatBridgeStore((s) => s.reference);
   const clear = useChatBridgeStore((s) => s.clear);
   if (!reference) return null;
+  const Icon = reference.kind === "template" ? PresentationIcon : Code2Icon;
   return (
     <div className="flex items-center gap-1.5 w-fit max-w-full px-2 py-1 bg-mc-mint/15 border border-mc-mint/30 rounded-md text-xs text-mc-dark">
-      <Code2Icon className="w-3 h-3 shrink-0 text-mc-gray" />
+      <Icon className="w-3 h-3 shrink-0 text-mc-gray" />
       <span className="truncate font-mono">{reference.label}</span>
       <button
         type="button"
@@ -168,7 +170,11 @@ const Composer: FC = () => {
   const materializeReference = () => {
     const { reference, clear } = useChatBridgeStore.getState();
     if (!reference) return;
-    composer.setText(reference.content + composer.getState().text);
+    // Keep an explicit, compact marker in the user message so the history can
+    // render a pill without having to reverse-engineer the reference prose.
+    const marker = `[[mach-reference:${reference.kind ?? "element"}:${encodeURIComponent(reference.label)}]]\n`;
+    const referenceContent = `[[mach-reference-content]]\n${reference.content}[[/mach-reference-content]]\n`;
+    composer.setText(marker + referenceContent + composer.getState().text);
     clear();
   };
 
@@ -392,7 +398,34 @@ const AssistantActionBar: FC = () => {
   );
 };
 
-const REFERENCE_RE = /^Regarding this element in `([^`]+)` \(at ([^)]+)\):\n\n```tsx\n[\s\S]*?\n```\s*/;
+// References can originate from either a TSX canvas element or a structured
+// slide-deck element. Keep the composer presentation neutral so both remain
+// compact and readable in the conversation.
+const REFERENCE_RE = /^Regarding this (?:slide )?element in `([^`]+)` \(at ([^)]+)\):\n\n```(?:tsx|json)\n[\s\S]*?\n```\s*/;
+const REFERENCE_MARKER_RE = /^\[\[mach-reference:(element|template):([^\]]+)\]\]\n/;
+const REFERENCE_CONTENT_RE = /^\[\[mach-reference-content\]\]\n[\s\S]*?\[\[\/mach-reference-content\]\]\n?/;
+const TEMPLATE_REFERENCE_RE = /^Use the uploaded PowerPoint template `([^`]+)` to generate a slide deck\. First call `inspect_potx_template` on it, then create and lint a template-bound slide deck\.\s*/;
+
+function decodeReferenceLabel(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function HistoryReferencePill({ label, kind, title }: { label: string; kind: "element" | "template"; title?: string }) {
+  const Icon = kind === "template" ? PresentationIcon : Code2Icon;
+  return (
+    <span
+      className="inline-flex max-w-full items-center gap-1 rounded border border-mc-mint/40 bg-mc-mint/20 px-2 py-0.5 font-mono text-[11px] text-mc-dark"
+      title={title ?? label}
+    >
+      <Icon className="size-3 shrink-0 text-mc-gray" />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
 
 const UserParts: FC = () => {
   const text = useAuiState((s) =>
@@ -401,20 +434,40 @@ const UserParts: FC = () => {
       .map((c) => c.text ?? "")
       .join("")
   );
+  const marker = text.match(REFERENCE_MARKER_RE);
+  if (marker) {
+    const kind = marker[1] === "template" ? "template" : "element";
+    const label = decodeReferenceLabel(marker[2]);
+    const afterMarker = text.slice(marker[0].length);
+    const hiddenReference = afterMarker.match(REFERENCE_CONTENT_RE);
+    const rest = afterMarker.slice(hiddenReference?.[0].length ?? 0).trim();
+    return (
+      <div className="flex flex-col items-start gap-1.5">
+        <HistoryReferencePill label={label} kind={kind} />
+        {rest && <span className="whitespace-pre-wrap">{rest}</span>}
+      </div>
+    );
+  }
+
   const match = text.match(REFERENCE_RE);
-  if (!match) return <MessagePrimitive.Parts />;
+  if (!match) {
+    const templateMatch = text.match(TEMPLATE_REFERENCE_RE);
+    if (!templateMatch) return <MessagePrimitive.Parts />;
+    const file = templateMatch[1].split("/").pop() ?? templateMatch[1];
+    const rest = text.slice(templateMatch[0].length).trim();
+    return (
+      <div className="flex flex-col items-start gap-1.5">
+        <HistoryReferencePill label={`${file} · slide template`} kind="template" title={templateMatch[1]} />
+        {rest && <span className="whitespace-pre-wrap">{rest}</span>}
+      </div>
+    );
+  }
 
   const file = match[1].split("/").pop() ?? match[1];
   const rest = text.slice(match[0].length).trim();
   return (
     <div className="flex flex-col items-start gap-1.5">
-      <span
-        className="inline-flex items-center gap-1 max-w-full rounded border border-mc-mint/40 bg-mc-mint/20 px-2 py-0.5 text-[11px] font-mono text-mc-dark"
-        title={`${match[1]} · ${match[2]}`}
-      >
-        <Code2Icon className="w-3 h-3 shrink-0 text-mc-gray" />
-        <span className="truncate">{file} · {match[2]}</span>
-      </span>
+      <HistoryReferencePill label={`${file} · ${match[2]}`} kind="element" title={`${match[1]} · ${match[2]}`} />
       {rest && <span className="whitespace-pre-wrap">{rest}</span>}
     </div>
   );

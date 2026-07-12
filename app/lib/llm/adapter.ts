@@ -16,16 +16,59 @@ import {
 } from "@/app/lib/chat-tools";
 import { engine } from "./engine";
 import { useEngineStore } from "@/app/store/engine";
-import type { EngineChatMessage, EngineStream, EngineToolCall } from "./client";
+import { modelHasVision } from "./client";
+import type { EngineChatMessage, EngineContentPart, EngineStream, EngineToolCall } from "./client";
 
 const THINKING = true;
-const PARALLEL_TOOL_CALLS = true;
+// Workspace tools frequently read-modify-write the same artifact (notably
+// slide decks). Running calls concurrently loses earlier mutations when a
+// model emits a batch, so execute every call in order.
+const PARALLEL_TOOL_CALLS = false;
 
-function extractText(m: ThreadMessage): string {
-  return m.content
+function collectImages(m: ThreadMessage) {
+  const text = m.content
     .filter((c): c is TextMessagePart => c.type === "text")
     .map((c) => c.text)
     .join("");
+  const imageUrls = new Set<string>();
+  const imageNames = new Set<string>();
+  const workspaceImagePaths = new Set<string>();
+  for (const part of m.content) {
+    if (part.type === "image" && part.image) imageUrls.add(part.image);
+    if (part.type === "image") imageNames.add(part.filename || "image attachment");
+  }
+  for (const attachment of m.attachments ?? []) {
+    if (attachment.type !== "image") continue;
+    const name = attachment.name || "image attachment";
+    imageNames.add(name);
+    workspaceImagePaths.add(`Uploads/${name}`);
+    for (const part of attachment.content) {
+      if (part.type === "image" && part.image) imageUrls.add(part.image);
+    }
+  }
+  return { text, imageUrls, imageNames, workspaceImagePaths };
+}
+
+function userContent(m: ThreadMessage, vision: boolean): string | EngineContentPart[] {
+  const { text, imageUrls, imageNames, workspaceImagePaths } = collectImages(m);
+  if (!imageNames.size) return text;
+
+  const paths = workspaceImagePaths.size
+    ? ` The uploaded file is available at ${[...workspaceImagePaths].join(", ")}.`
+    : "";
+
+  if (!vision || !imageUrls.size) {
+    const notice = `[${[...imageNames].join(", ")} attached, but omitted: the integrated WebGPU model has no vision.${paths}]`;
+    return text ? `${text}\n\n${notice}` : notice;
+  }
+
+  const lead = workspaceImagePaths.size
+    ? `${text ? `${text}\n\n` : ""}[Attached image available in the workspace at ${[...workspaceImagePaths].join(", ")}.]`
+    : text;
+  const parts: EngineContentPart[] = [];
+  if (lead) parts.push({ type: "text", text: lead });
+  for (const url of imageUrls) parts.push({ type: "image_url", image_url: { url, detail: "auto" } });
+  return parts;
 }
 
 function toolArgsForPrompt(part: ToolCallMessagePart): Record<string, unknown> {
@@ -41,7 +84,8 @@ function toolArgsForPrompt(part: ToolCallMessagePart): Record<string, unknown> {
 
 function toEngineMessages(
   messages: readonly ThreadMessage[],
-  system: string | undefined
+  system: string | undefined,
+  vision: boolean
 ): EngineChatMessage[] {
   const history: EngineChatMessage[] = [
     ...(system ? [{ role: "system" as const, content: system }] : []),
@@ -49,7 +93,7 @@ function toEngineMessages(
 
   for (const message of messages) {
     if (message.role === "user") {
-      history.push({ role: "user", content: extractText(message) });
+      history.push({ role: "user", content: userContent(message, vision) });
       continue;
     }
 
@@ -180,13 +224,16 @@ async function* runGeneration({
 }: Pick<ChatModelRunOptions, "messages" | "abortSignal" | "context">) {
   const llm = await engine.getClient();
   const settings = engine.applyRuntimeSettings();
+  const { activeModel, modalities } = useEngineStore.getState();
+  const vision = modelHasVision(modalities);
   const toolDefs = toFunctionToolDefs(context.tools);
-  const history = toEngineMessages(messages, context.system);
+  const history = toEngineMessages(messages, context.system, vision);
   const parts: ThreadAssistantMessagePart[] = [];
 
   for (;;) {
     const stream = (await llm.chat.completions.create(
       {
+        model: activeModel ?? undefined,
         messages: history,
         tools: toolDefs,
         parallel_tool_calls: PARALLEL_TOOL_CALLS,
@@ -271,9 +318,11 @@ async function* runGeneration({
       return;
     }
 
-    const executions = await Promise.all(
-      toolCalls.map((call) => executeToolCall(call, context, abortSignal))
-    );
+    const executions: ToolExecution[] = [];
+    for (const call of toolCalls) {
+      if (abortSignal.aborted) return;
+      executions.push(await executeToolCall(call, context, abortSignal));
+    }
     executions.forEach((execution, i) => {
       const slot = slotFor(i, execution.call.id);
       patchToolPart(slot.partIdx, execution.patch);

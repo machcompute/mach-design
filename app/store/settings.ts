@@ -88,6 +88,7 @@ interface SettingsState extends WebGpuRuntimeSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
+  webgpuModel: string;
   provider: ChatProvider;
   set: (patch: Partial<Omit<SettingsState, "set">>) => void;
 }
@@ -98,6 +99,9 @@ export const useSettingsStore = create<SettingsState>()(
       baseUrl: "http://localhost:11434/v1",
       apiKey: "",
       model: "",
+      // The engine supplies its available models at runtime. Selection is
+      // intentionally empty until the user explicitly chooses one.
+      webgpuModel: "",
       provider: "byok",
       ...DEFAULT_WEBGPU_SETTINGS,
       set: (patch) =>
@@ -108,14 +112,19 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: "mach-settings",
-      version: 1,
-      migrate: (persistedState) => {
+      version: 2,
+      migrate: (persistedState, version) => {
         if (!persistedState || typeof persistedState !== "object") return persistedState;
         const state = persistedState as Partial<SettingsState>;
-        if (state.webgpuMaxContext === undefined || state.webgpuMaxContext === 16384) {
-          return { ...state, webgpuMaxContext: DEFAULT_WEBGPU_SETTINGS.webgpuMaxContext };
+        const migrated = state.webgpuMaxContext === undefined || state.webgpuMaxContext === 16384
+          ? { ...state, webgpuMaxContext: DEFAULT_WEBGPU_SETTINGS.webgpuMaxContext }
+          : state;
+        // Version 1 exposed only fixed choices. Clear the old selection so
+        // every upgraded installation selects from the live engine catalog.
+        if (version < 2) {
+          return { ...migrated, webgpuModel: "" };
         }
-        return state;
+        return migrated;
       },
     }
   )

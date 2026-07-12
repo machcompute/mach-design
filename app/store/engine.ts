@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { EngineModel } from "@/app/lib/llm/client";
 
 export type EngineStatus = "idle" | "loading" | "ready" | "error";
 
@@ -16,6 +17,9 @@ interface EngineState {
   deviceInfo: DeviceInfo | null;
   cacheKnown: boolean | null;
   hasMtp: boolean;
+  activeModel: string | null;
+  availableModels: EngineModel[];
+  modalities: string[];
   contextUsedTokens: number;
   contextMaxTokens: number;
   generating: boolean;
@@ -33,6 +37,9 @@ export const useEngineStore = create<EngineState>()((set) => ({
   deviceInfo: null,
   cacheKnown: null,
   hasMtp: false,
+  activeModel: null,
+  availableModels: [],
+  modalities: ["text"],
   contextUsedTokens: 0,
   contextMaxTokens: 0,
   generating: false,

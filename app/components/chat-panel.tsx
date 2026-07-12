@@ -13,6 +13,8 @@ import {
   type TextMessagePart,
   type ToolCallMessagePart,
   type ThreadMessage,
+  type AttachmentAdapter,
+  SimpleImageAttachmentAdapter,
 } from "@assistant-ui/react";
 import { Eraser } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
@@ -21,6 +23,17 @@ import { useFilesystemStore } from "@/app/store/filesystem";
 import { useCanvasStore } from "@/app/store/canvas";
 import { useWorkspaceStore } from "@/app/store/workspace";
 import { lintTsx } from "@/app/lib/lint-tsx";
+import { lintDeck } from "@/app/lib/lint-deck";
+import { parsePotxTemplate } from "@/app/lib/potx-template";
+import { exportDeckToPdf, exportDeckToPptx } from "@/app/lib/deck-export";
+import {
+  createEmptyDeck,
+  normalizeDeck,
+  normalizeTemplateManifest,
+  type DeckAssetResolver,
+  type SlideDeck,
+  type TemplateManifest,
+} from "@/app/lib/slides";
 import {
   normalizeToolResultForModel,
   parseToolArgsText,
@@ -29,9 +42,32 @@ import {
   toFunctionToolDefs,
 } from "@/app/lib/chat-tools";
 import { localAdapter } from "@/app/lib/llm/adapter";
+import { useEngineStore } from "@/app/store/engine";
+import { modelHasVision } from "@/app/lib/llm/client";
+import {
+  addImageElementTool, addLineElementTool, addShapeElementTool, addSlideTool, addTextElementTool,
+  createPresentationOutlineTool, deleteSlideElementTool, deleteSlideTool, duplicateSlideTool,
+  getDeckSummaryTool, getPresentationOutlineSlideTool, getPresentationOutlineTool, getSlideElementTool,
+  getSlideIndexTool, getSlideLayoutTool, listSlideLayoutsTool, moveSlideTool, updateSlideElementTool, updateSlideTool,
+} from "@/app/lib/deck-authoring-tools";
 
 type FnToolCall = OpenAI.ChatCompletionMessageToolCall & { type: "function" };
 type Part = TextMessagePart | ToolCallMessagePart;
+
+// The composer accepts image files for all providers. Each attachment is also
+// persisted to Uploads, so slide tools can refer to a stable workspace path.
+// The BYOK transport forwards image_url parts; WebGPU deliberately omits the
+// pixels (see llm/adapter.ts).
+const baseImageAttachmentAdapter = new SimpleImageAttachmentAdapter();
+const imageAttachmentAdapter: AttachmentAdapter = {
+  accept: baseImageAttachmentAdapter.accept,
+  add: (state) => baseImageAttachmentAdapter.add(state),
+  send: async (attachment) => {
+    await useFilesystemStore.getState().uploadFiles([attachment.file]);
+    return baseImageAttachmentAdapter.send(attachment);
+  },
+  remove: () => baseImageAttachmentAdapter.remove(),
+};
 
 const LEGACY_FUNCTION_CALL_ID_PREFIX = "call_mach_legacy_";
 
@@ -63,17 +99,48 @@ function tryParseToolArgs(argsText: string): Record<string, unknown> {
   }
 }
 
+function collectUserContent(message: ThreadMessage): OpenAI.ChatCompletionContentPart[] {
+  const content: OpenAI.ChatCompletionContentPart[] = [];
+  const imageUrls = new Set<string>();
+  let text = "";
+
+  const addPart = (part: (typeof message.content)[number]) => {
+    if (part.type === "text") {
+      text += part.text;
+    } else if (part.type === "image" && part.image) {
+      imageUrls.add(part.image);
+    }
+  };
+
+  message.content.forEach(addPart);
+  const workspaceImagePaths = new Set<string>();
+  for (const attachment of message.attachments ?? []) {
+    for (const part of attachment.content) addPart(part as (typeof message.content)[number]);
+    if (attachment.type === "image") workspaceImagePaths.add(`Uploads/${attachment.name}`);
+  }
+
+  if (workspaceImagePaths.size) {
+    text += `${text ? "\n\n" : ""}[Attached image available in the workspace at ${[...workspaceImagePaths].map((path) => `\`${path}\``).join(", ")}.]`;
+  }
+
+  if (text) content.push({ type: "text", text });
+  for (const url of imageUrls) {
+    content.push({ type: "image_url", image_url: { url, detail: "auto" } });
+  }
+  return content;
+}
+
 function toOpenAIMessages(
   messages: readonly ThreadMessage[]
 ): OpenAI.ChatCompletionMessageParam[] {
   const result: OpenAI.ChatCompletionMessageParam[] = [];
   for (const m of messages) {
     if (m.role === "user") {
-      const text = m.content
-        .filter((c): c is TextMessagePart => c.type === "text")
-        .map((c) => c.text)
-        .join("");
-      result.push({ role: "user", content: text });
+      const content = collectUserContent(m);
+      result.push({
+        role: "user",
+        content: content.length === 1 && content[0].type === "text" ? content[0].text : content,
+      });
     } else if (m.role === "assistant") {
       let text = "";
       let pendingToolCalls: FnToolCall[] = [];
@@ -359,24 +426,90 @@ const byokAdapter: ChatModelAdapter = {
   },
 };
 
+interface StoredTemplate {
+  manifest: TemplateManifest;
+  sourcePath?: string;
+}
+
+function pathSegments(path: string): string[] {
+  const segments = path.split("/").filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error("Use a non-empty workspace path without . or .. segments.");
+  }
+  return segments;
+}
+
+async function readWorkspaceFile(path: string): Promise<File> {
+  const segments = pathSegments(path);
+  const name = segments.pop()!;
+  return useFilesystemStore.getState().readFileAt(segments, name);
+}
+
+async function writeWorkspaceFile(path: string, data: BlobPart, type: string): Promise<void> {
+  const segments = pathSegments(path);
+  if (segments[0] === "Uploads") throw new Error("The Uploads folder is read-only. Save generated files outside Uploads.");
+  const name = segments.pop()!;
+  await useFilesystemStore.getState().uploadFilesTo(segments, [new File([data], name, { type })]);
+}
+
+const workspaceAssetResolver: DeckAssetResolver = async (source) => {
+  if (/^(data:image\/|blob:|https?:\/\/)/i.test(source)) return source;
+  return readWorkspaceFile(source).catch(() => null);
+};
+
+async function readDeck(path: string): Promise<{ deck: SlideDeck; issues: ReturnType<typeof normalizeDeck>["issues"] }> {
+  const text = await (await readWorkspaceFile(path)).text();
+  const parsed = normalizeDeck(text);
+  return { deck: parsed.deck, issues: parsed.issues };
+}
+
+async function writeDeck(path: string, input: unknown): Promise<{ deck: SlideDeck; issues: ReturnType<typeof normalizeDeck>["issues"] }> {
+  const parsed = normalizeDeck(input);
+  await writeWorkspaceFile(path, JSON.stringify(parsed.deck, null, 2), "application/json");
+  return { deck: parsed.deck, issues: parsed.issues };
+}
+
+async function readStoredTemplate(path: string): Promise<StoredTemplate> {
+  if (/\.potx$/i.test(path)) {
+    const file = await readWorkspaceFile(path);
+    return { manifest: await parsePotxTemplate(file, { fileName: file.name }), sourcePath: path };
+  }
+  const text = await (await readWorkspaceFile(path)).text();
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error(`Template manifest ${path} is not valid JSON.`);
+  }
+  const wrapper = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  return {
+    manifest: normalizeTemplateManifest(wrapper.manifest ?? raw),
+    ...(typeof wrapper.sourcePath === "string" ? { sourcePath: wrapper.sourcePath } : {}),
+  };
+}
+
+function templateManifestPath(path: string): string {
+  const name = path.split("/").pop()!.replace(/\.potx$/i, "") || "template";
+  return `Templates/${name}.template.json`;
+}
+
 const SYSTEM_PROMPT = `\
 # Mach Design — AI Designer
 
-You are an expert UI/UX designer and React engineer embedded in Mach Design, an agentic design tool. Your role is to help users design and build interfaces by writing real **React components in TSX**, iterating on layouts, and refining visual details.
+You are an expert UI/UX designer and presentation designer embedded in Mach Design. You create either interactive **React apps** or editable **slide decks**. Choose the format the user asks for; do not turn a requested presentation into a web page.
 
-You think in components, spacing systems, and visual hierarchy. You are opinionated but explain your reasoning.
+## React app format
 
-## Output format — read carefully
-
-Every design you produce is a **TSX React component** that renders live on the canvas. Strict rules:
+For apps, create a TSX React component that renders live on the canvas. Strict rules:
 
 - Define one component named **\`App\`** and end the file with \`export default App;\` (or write \`export default function App() { … }\`).
 - **Write normal \`import\` statements.** Import hooks from React (\`import { useState, useEffect, useRef } from "react";\`) and icons from lucide-react (\`import { Heart, Star } from "lucide-react";\`).
-- **Only these packages are available:** \`react\`, \`react-dom\`, \`lucide-react\`. Importing anything else will fail — do not use other libraries.
-- Style with **Tailwind utility classes** (\`className="…"\`) and/or inline \`style={{ … }}\` objects. Tailwind is loaded in the preview, so utility classes work out of the box.
-- \`App\` is the rendered component; you may define helper components/functions in the same file.
-- Make it interactive and polished — use state and effects where they improve the design.
-- The canvas type-checks and lint-checks your code (TypeScript + react-hooks); write type-correct code and follow the rules of hooks.
+- **Only these packages are available in app previews:** \`react\`, \`react-dom\`, \`lucide-react\`. Importing anything else will fail.
+- Style with Tailwind utility classes and/or inline style objects. The canvas type-checks and lint-checks TSX.
+
+## Slide deck format
+
+For slides, decks, presentations, or PowerPoint, use only dedicated deck tools—never TSX or raw deck JSON. Save a concise outline, create the deck, author with typed slide/element tools, lint, then show or export. Read only paginated indexes; request one element or layout only when editing it. Use stable IDs, in-bounds geometry, explicit styles, and image alt text. Inspect a supplied \`.potx\` before creating its deck.
 
 ## Multi-page apps
 
@@ -393,7 +526,8 @@ You can build multi-page applications: each page is its own \`.tsx\` file under 
 ## Behaviour
 
 - Ask clarifying questions before generating large designs.
-- Save the component with \`write_file\` to a \`.tsx\` path (e.g. \`Outputs/App.tsx\`), then call \`lint_file\` to check it — fix any reported errors and re-lint until clean, then call \`show_file\` to preview it.
+- For a React app, save with \`write_file\` to a \`.tsx\` path, call \`lint_file\`, fix every error, then call \`show_file\`.
+- For a slide deck: outline → create → typed mutations → lint → show/export. Never use generic file tools on deck or outline JSON. Preview/export reject errors; warnings remain visible.
 - When iterating, describe what changed and why.
 
 ## Tools
@@ -457,6 +591,10 @@ Renders a saved TSX component on the canvas tab so the user can preview it live.
 - **Parameters:** \`path\` (string) — slash-separated path to a \`.tsx\` file, e.g. \`"Outputs/App.tsx"\`
 - **Returns:** confirmation
 - **Use when:** after writing a component and it lints clean — always show it so the user can see the result
+
+### Slide tools
+
+Use concise outline, deck/slide/layout indexes, and single-element detail reads. Use typed slide and element mutations for all edits; lint before show/export.
 `;
 
 const listFilesTool = {
@@ -478,14 +616,22 @@ const listFilesTool = {
   },
 };
 
+function isManagedDeckArtifact(path: string) {
+  return /\.(?:slides|deck|outline|template)\.json$/i.test(path);
+}
+
 const readFileTool = {
   toolName: "read_file",
   type: "frontend" as const,
   description: "Reads the contents of a file from the Uploads folder",
   parameters: z.object({ path: z.string().describe('Slash-separated path to the file, e.g. "Outputs/App.tsx"') }),
   execute: async ({ path }: { path: string }) => {
+    if (isManagedDeckArtifact(path)) return "Deck and outline JSON are compact-tool only. Use get_deck_summary, get_slide_index, get_slide_element, get_presentation_outline, or get_presentation_outline_slide.";
     const segments = path.split("/").filter(Boolean);
     const name = segments.pop()!;
+    if (/\.potx$/i.test(name)) {
+      return `This is a PowerPoint template. Use inspect_potx_template with path ${JSON.stringify(path)} instead of reading its binary data.`;
+    }
     const file = await useFilesystemStore.getState().readFileAt(segments, name);
     if (file.type.startsWith("text/") || file.type === "application/json" || file.type === "") {
       return file.text();
@@ -504,6 +650,7 @@ const writeFileTool = {
     content: z.string().describe("File content as a UTF-8 string"),
   }),
   execute: async ({ path, content }: { path: string; content: string }) => {
+    if (isManagedDeckArtifact(path)) return "Deck and outline JSON cannot be written with write_file. Use create_presentation_outline, create_slide_deck, and typed deck mutation tools.";
     const segments = path.split("/").filter(Boolean);
     if (segments[0] === "Uploads") return "Error: the Uploads folder is read-only. Save files to a different folder.";
     const name = segments.pop()!;
@@ -537,6 +684,7 @@ const searchAndReplaceTool = {
     replace: z.string().describe("String to substitute in its place"),
   }),
   execute: async ({ path, search, replace }: { path: string; search: string; replace: string }) => {
+    if (isManagedDeckArtifact(path)) return "Deck and outline JSON cannot be edited with search_and_replace. Use typed deck mutation tools.";
     const segments = path.split("/").filter(Boolean);
     const name = segments.pop()!;
     const store = useFilesystemStore.getState();
@@ -592,8 +740,166 @@ const showFileTool = {
   },
 };
 
-function ChatTools() {
-  useAssistantInstructions(SYSTEM_PROMPT);
+const inspectPotxTemplateTool = {
+  toolName: "inspect_potx_template",
+  type: "frontend" as const,
+  description: "Imports an uploaded .potx PowerPoint template, extracts its slide size/theme/layouts/placeholders, and saves a reusable template manifest.",
+  parameters: z.object({
+    path: z.string().describe('Path to an uploaded .potx file, e.g. "Uploads/BrandTemplate.potx"'),
+    outputPath: z.string().optional().describe('Optional workspace path for the extracted template manifest. Defaults to "Templates/<name>.template.json".'),
+  }),
+  execute: async ({ path, outputPath }: { path: string; outputPath?: string }) => {
+    if (!/\.potx$/i.test(path)) return "Error: inspect_potx_template only accepts a .potx file. Macro-enabled .potm files are not supported.";
+    const file = await readWorkspaceFile(path);
+    const manifest = await parsePotxTemplate(file, { fileName: file.name });
+    const savedPath = outputPath ?? templateManifestPath(path);
+    await writeWorkspaceFile(savedPath, JSON.stringify({ manifest, sourcePath: path }, null, 2), "application/json");
+    return {
+      templatePath: savedPath,
+      sourcePath: path,
+      name: manifest.name,
+      slideSize: manifest.slideSize,
+      theme: manifest.theme,
+      layoutCount: manifest.layouts.length,
+      layouts: manifest.layouts.slice(0, 20).map((layout) => ({ id: layout.id, name: layout.name, type: layout.type, placeholderCount: layout.placeholders.length })),
+      hasMoreLayouts: manifest.layouts.length > 20,
+      warningCount: manifest.warnings?.length ?? 0,
+    };
+  },
+};
+
+const createSlideDeckTool = {
+  toolName: "create_slide_deck",
+  type: "frontend" as const,
+  description: "Creates a new canonical .slides.json presentation, optionally bound to a .potx file or extracted template manifest.",
+  parameters: z.object({
+    path: z.string().describe('Output deck path, usually "Outputs/<name>.slides.json".'),
+    name: z.string().describe("Presentation title/name"),
+    id: z.string().optional().describe("Stable deck ID; use lowercase words separated by hyphens."),
+    templatePath: z.string().optional().describe('Optional .potx input path or manifest path returned by inspect_potx_template.'),
+    outlinePath: z.string().optional().describe('Optional persisted presentation outline created with create_presentation_outline. Its slide briefs become deck slide stubs.'),
+  }),
+  execute: async ({ path, name, id, templatePath, outlinePath }: { path: string; name: string; id?: string; templatePath?: string; outlinePath?: string }) => {
+    let deck: SlideDeck;
+    if (templatePath) {
+      const { manifest, sourcePath } = await readStoredTemplate(templatePath);
+      // A blank layout is useful for a deliberate empty slide, but selecting
+      // it by default hides most template branding/artwork in new decks.
+      const defaultLayoutId = manifest.layouts.find((layout) => layout.type !== "blank" && (layout.placeholders.length > 0 || (layout.previewElements?.length ?? 0) > 0))?.id
+        ?? manifest.layouts.find((layout) => layout.type !== "blank")?.id
+        ?? manifest.layouts.find((layout) => layout.type === "blank")?.id
+        ?? manifest.layouts[0]?.id;
+      deck = createEmptyDeck({
+        id: id ?? (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "deck"),
+        name,
+        size: manifest.slideSize,
+        theme: manifest.theme,
+        template: { manifest, ...(sourcePath ? { sourcePath } : {}), ...(defaultLayoutId ? { defaultLayoutId } : {}) },
+      });
+      if (defaultLayoutId) deck = { ...deck, slides: deck.slides.map((slide) => ({ ...slide, layoutId: defaultLayoutId })) };
+    } else {
+      deck = createEmptyDeck({
+        id: id ?? (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "deck"),
+        name,
+      });
+    }
+    if (outlinePath) {
+      const raw = JSON.parse(await (await readWorkspaceFile(outlinePath)).text()) as { deckPath?: string; slides?: Array<{ id?: string; title?: string; layoutHint?: string }> };
+      if (raw.deckPath && raw.deckPath !== path) throw new Error(`Outline belongs to ${JSON.stringify(raw.deckPath)}, not ${JSON.stringify(path)}.`);
+      if (!raw.slides?.length) throw new Error("Presentation outline must contain at least one slide brief.");
+      const ids = raw.slides.map((slide) => slide.id ?? "");
+      if (ids.some((slideId) => !slideId) || new Set(ids).size !== ids.length) throw new Error("Presentation outline must provide unique non-empty slide IDs.");
+      for (const slide of raw.slides) {
+        if (slide.layoutHint && deck.template && !deck.template.manifest.layouts.some((layout) => layout.id === slide.layoutHint)) {
+          throw new Error(`Outline layout hint ${JSON.stringify(slide.layoutHint)} is not available in the selected template.`);
+        }
+      }
+      deck = {
+        ...deck,
+        slides: raw.slides.map((slide, index) => ({
+          id: slide.id!,
+          name: slide.title ?? `Slide ${index + 1}`,
+          ...(slide.layoutHint && deck.template ? { layoutId: slide.layoutHint } : {}),
+          elements: [],
+        })),
+      };
+    }
+    const saved = await writeDeck(path, deck);
+    return { ok: true, path, id: saved.deck.id, slideCount: saved.deck.slides.length, warningCount: saved.issues.filter((issue) => issue.severity === "warning").length };
+  },
+};
+
+const lintSlideDeckTool = {
+  toolName: "lint_slide_deck",
+  type: "frontend" as const,
+  description: "Lints a slide deck for invalid schema, element geometry, overflow, contrast, overlap, image assets, and template layout/placeholder issues.",
+  parameters: z.object({ path: z.string().describe('Deck path, e.g. "Outputs/company-update.slides.json"') }),
+  execute: async ({ path }: { path: string }) => {
+    const raw = await (await readWorkspaceFile(path)).text();
+    const diagnostics = await lintDeck(raw, { assetResolver: workspaceAssetResolver });
+    const compact = (diagnostic: (typeof diagnostics)[number]) => ({ severity: diagnostic.severity, code: diagnostic.code, message: diagnostic.message, slideId: diagnostic.slideId, elementId: diagnostic.elementId });
+    return {
+      path,
+      valid: !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+      errors: diagnostics.filter((diagnostic) => diagnostic.severity === "error").map(compact),
+      warnings: diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map(compact),
+    };
+  },
+};
+
+const showSlideDeckTool = {
+  toolName: "show_slide_deck",
+  type: "frontend" as const,
+  description: "Opens a saved .slides.json deck in the canvas with slide navigation, element editing, lint problems, and PPTX/PDF export.",
+  parameters: z.object({ path: z.string().describe('Deck path, e.g. "Outputs/company-update.slides.json"') }),
+  execute: async ({ path }: { path: string }) => {
+    const { deck } = await readDeck(path);
+    const diagnostics = await lintDeck(deck, { assetResolver: workspaceAssetResolver });
+    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (errors.length) return { error: "Deck has validation errors and cannot be shown.", errors: errors.map((diagnostic) => ({ code: diagnostic.code, message: diagnostic.message, slideId: diagnostic.slideId, elementId: diagnostic.elementId })) };
+    useCanvasStore.getState().setDeck(deck, path);
+    useWorkspaceStore.getState().setActiveTab("canvas");
+    return { ok: true, path, slideCount: deck.slides.length, warningCount: diagnostics.filter((diagnostic) => diagnostic.severity === "warning").length };
+  },
+};
+
+const exportSlideDeckTool = {
+  toolName: "export_slide_deck",
+  type: "frontend" as const,
+  description: "Exports a saved slide deck to an editable PPTX or vector-first PDF file in the workspace. Template-bound PPTX exports preserve the imported POTX masters/layouts.",
+  parameters: z.object({
+    path: z.string().describe('Deck path, e.g. "Outputs/company-update.slides.json"'),
+    format: z.enum(["pptx", "pdf"]).describe("Export format"),
+    outputPath: z.string().optional().describe('Optional output path. Defaults to "Exports/<deck-name>.<format>".'),
+  }),
+  execute: async ({ path, format, outputPath }: { path: string; format: "pptx" | "pdf"; outputPath?: string }) => {
+    const { deck } = await readDeck(path);
+    const diagnostics = await lintDeck(deck, { assetResolver: workspaceAssetResolver });
+    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (errors.length) return { error: "Deck has validation errors and cannot be exported.", errors: errors.map((diagnostic) => ({ code: diagnostic.code, message: diagnostic.message, slideId: diagnostic.slideId, elementId: diagnostic.elementId })) };
+    const warnings: string[] = [];
+    const blob = format === "pptx"
+      ? await exportDeckToPptx(deck, {
+          assetResolver: workspaceAssetResolver,
+          templateResolver: async (sourcePath) => readWorkspaceFile(sourcePath).catch(() => null),
+          fallbackFromTemplate: false,
+          onWarning: (warning) => warnings.push(warning.message),
+        })
+      : await exportDeckToPdf(deck, { assetResolver: workspaceAssetResolver });
+    const base = (path.split("/").pop() ?? deck.name).replace(/\.(slides|deck)\.json$/i, "").replace(/\.json$/i, "") || "presentation";
+    const target = outputPath ?? `Exports/${base}.${format}`;
+    await writeWorkspaceFile(target, blob, format === "pptx" ? "application/vnd.openxmlformats-officedocument.presentationml.presentation" : "application/pdf");
+    return { path: target, format, bytes: blob.size, warnings };
+  },
+};
+
+function ChatTools({ provider }: { provider: "byok" | "webgpu" }) {
+  const webgpuVision = useEngineStore((s) => modelHasVision(s.modalities));
+  useAssistantInstructions(
+    provider === "webgpu" && !webgpuVision
+      ? `${SYSTEM_PROMPT}\n\n## Image capability\nThe integrated WebGPU model has **no vision**. Image attachments are retained for the user but their pixels are not available to you. Say so clearly and ask for a description when image content matters. You can still place an uploaded image in a slide with its file path.`
+      : SYSTEM_PROMPT
+  );
   useAssistantTool(listFilesTool);
   useAssistantTool(readFileTool);
   useAssistantTool(writeFileTool);
@@ -601,6 +907,30 @@ function ChatTools() {
   useAssistantTool(searchAndReplaceTool);
   useAssistantTool(lintFileTool);
   useAssistantTool(showFileTool);
+  useAssistantTool(inspectPotxTemplateTool);
+  useAssistantTool(createSlideDeckTool);
+  useAssistantTool(lintSlideDeckTool);
+  useAssistantTool(showSlideDeckTool);
+  useAssistantTool(exportSlideDeckTool);
+  useAssistantTool(createPresentationOutlineTool);
+  useAssistantTool(getPresentationOutlineTool);
+  useAssistantTool(getPresentationOutlineSlideTool);
+  useAssistantTool(getDeckSummaryTool);
+  useAssistantTool(getSlideIndexTool);
+  useAssistantTool(getSlideElementTool);
+  useAssistantTool(listSlideLayoutsTool);
+  useAssistantTool(getSlideLayoutTool);
+  useAssistantTool(addSlideTool);
+  useAssistantTool(updateSlideTool);
+  useAssistantTool(duplicateSlideTool);
+  useAssistantTool(moveSlideTool);
+  useAssistantTool(deleteSlideTool);
+  useAssistantTool(addTextElementTool);
+  useAssistantTool(addShapeElementTool);
+  useAssistantTool(addImageElementTool);
+  useAssistantTool(addLineElementTool);
+  useAssistantTool(updateSlideElementTool);
+  useAssistantTool(deleteSlideElementTool);
   return null;
 }
 
@@ -620,11 +950,13 @@ function ClearButton() {
 
 export default function ChatPanel() {
   const provider = useSettingsStore((s) => s.provider);
-  const runtime = useLocalRuntime(provider === "webgpu" ? localAdapter : byokAdapter);
+  const runtime = useLocalRuntime(provider === "webgpu" ? localAdapter : byokAdapter, {
+    adapters: { attachments: imageAttachmentAdapter },
+  });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ChatTools />
+      <ChatTools provider={provider} />
       <div className="flex items-center justify-between h-12 px-4 border-b border-mc-gray/15 shrink-0">
         <span className="text-xs font-semibold uppercase tracking-wider text-mc-gray/60">Chat</span>
         <ClearButton />
