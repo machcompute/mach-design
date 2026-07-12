@@ -61,6 +61,12 @@ export function stringifyToolResultForModel(
   return modelContent ? stringifyModelContent(modelContent) : stringifyToolResult(result);
 }
 
+export function toolModelContentImageUrls(parts?: readonly ToolModelContentPart[]): string[] {
+  return (parts ?? []).flatMap((part) => part.type === "file" && part.mediaType.startsWith("image/")
+    ? [`data:${part.mediaType};base64,${part.data}`]
+    : []);
+}
+
 export async function normalizeToolResultForModel(
   tool: ToolDef | undefined,
   rawResult: unknown,

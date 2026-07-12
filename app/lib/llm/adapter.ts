@@ -13,6 +13,7 @@ import {
   stringifyToolResult,
   parseToolArgsText,
   toFunctionToolDefs,
+  toolModelContentImageUrls,
 } from "@/app/lib/chat-tools";
 import { engine } from "./engine";
 import { useEngineStore } from "@/app/store/engine";
@@ -102,14 +103,23 @@ function toEngineMessages(
     let text = "";
     let pendingToolCalls: EngineToolCall[] = [];
     let pendingToolResponses: EngineChatMessage[] = [];
+    let pendingToolImages: string[] = [];
 
     const flushTools = () => {
       if (!pendingToolCalls.length) return;
       history.push({ role: "assistant", content: text, tool_calls: pendingToolCalls });
       history.push(...pendingToolResponses);
+      if (vision && pendingToolImages.length) history.push({
+        role: "user",
+        content: [
+          { type: "text", text: "Slide screenshot returned by the preceding tool call." },
+          ...pendingToolImages.map((url) => ({ type: "image_url" as const, image_url: { url, detail: "high" as const } })),
+        ],
+      });
       text = "";
       pendingToolCalls = [];
       pendingToolResponses = [];
+      pendingToolImages = [];
     };
 
     for (const part of message.content) {
@@ -130,6 +140,7 @@ function toEngineMessages(
           tool_call_id: part.toolCallId,
           content: stringifyToolResultForModel(part.result, part.modelContent),
         });
+        pendingToolImages.push(...toolModelContentImageUrls(part.modelContent));
       }
     }
 
@@ -341,6 +352,16 @@ async function* runGeneration({
         role: "tool",
         tool_call_id: execution.call.id,
         content: execution.modelText,
+      });
+    }
+    const toolImages = executions.flatMap((execution) => toolModelContentImageUrls(execution.patch.modelContent));
+    if (vision && toolImages.length) {
+      history.push({
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect the slide screenshot returned by the preceding tool call." },
+          ...toolImages.map((url) => ({ type: "image_url" as const, image_url: { url, detail: "high" as const } })),
+        ],
       });
     }
   }

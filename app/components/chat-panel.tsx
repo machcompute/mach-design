@@ -26,6 +26,7 @@ import { lintTsx } from "@/app/lib/lint-tsx";
 import { lintDeck } from "@/app/lib/lint-deck";
 import { parsePotxTemplate } from "@/app/lib/potx-template";
 import { exportDeckToPdf, exportDeckToPptx } from "@/app/lib/deck-export";
+import { captureDeckSlide } from "@/app/lib/capture-deck-slide";
 import {
   createEmptyDeck,
   normalizeDeck,
@@ -39,6 +40,7 @@ import {
   parseToolArgsText,
   stringifyToolResultForModel,
   stringifyToolResult,
+  toolModelContentImageUrls,
   toFunctionToolDefs,
 } from "@/app/lib/chat-tools";
 import { localAdapter } from "@/app/lib/llm/adapter";
@@ -146,14 +148,23 @@ function toOpenAIMessages(
       let text = "";
       let pendingToolCalls: FnToolCall[] = [];
       let pendingToolMessages: OpenAI.ChatCompletionToolMessageParam[] = [];
+      let pendingToolImages: string[] = [];
 
       const flushTools = () => {
         if (!pendingToolCalls.length) return;
         result.push({ role: "assistant", content: text || null, tool_calls: pendingToolCalls });
         result.push(...pendingToolMessages);
+        if (pendingToolImages.length) result.push({
+          role: "user",
+          content: [
+            { type: "text", text: "Slide screenshot returned by the preceding tool call." },
+            ...pendingToolImages.map((url) => ({ type: "image_url" as const, image_url: { url, detail: "high" as const } })),
+          ],
+        });
         text = "";
         pendingToolCalls = [];
         pendingToolMessages = [];
+        pendingToolImages = [];
       };
 
       for (const part of m.content) {
@@ -193,6 +204,7 @@ function toOpenAIMessages(
             tool_call_id: part.toolCallId,
             content: modelText,
           });
+          pendingToolImages.push(...toolModelContentImageUrls(part.modelContent));
         }
       }
 
@@ -421,6 +433,16 @@ const byokAdapter: ChatModelAdapter = {
         });
         for (const { toolCall, modelText } of toolResults) {
           history.push({ role: "tool", tool_call_id: toolCall.id, content: modelText });
+        }
+        const toolImages = toolResults.flatMap(({ modelContent }) => toolModelContentImageUrls(modelContent));
+        if (toolImages.length) {
+          history.push({
+            role: "user",
+            content: [
+              { type: "text", text: "Inspect the slide screenshot returned by the preceding tool call." },
+              ...toolImages.map((url) => ({ type: "image_url" as const, image_url: { url, detail: "high" as const } })),
+            ],
+          });
         }
       }
     }
@@ -902,6 +924,46 @@ const exportSlideDeckTool = {
   },
 };
 
+const slideScreenshots = new Map<string, { data: string; filename: string }>();
+const screenshotSlideTool = {
+  toolName: "screenshot_slide",
+  type: "frontend" as const,
+  description: "Captures one slide from a saved deck as a PNG so a vision-capable model can inspect its rendered appearance.",
+  parameters: z.object({
+    path: z.string().describe('Deck path, e.g. "Outputs/company-update.slides.json"'),
+    slideId: z.string().describe("Stable slide ID to capture"),
+  }),
+  execute: async ({ path, slideId }: { path: string; slideId: string }, context: { toolCallId: string }) => {
+    const { deck } = await readDeck(path);
+    const slideIndex = deck.slides.findIndex((slide) => slide.id === slideId);
+    if (slideIndex < 0) throw new Error(`Slide ${JSON.stringify(slideId)} does not exist.`);
+    const imageSources: Record<string, string | undefined> = {};
+    await Promise.all(deck.slides[slideIndex].elements.filter((element) => element.type === "image").map(async (element) => {
+      const resolved = await workspaceAssetResolver(element.src, { deck, slide: deck.slides[slideIndex], element });
+      if (typeof resolved === "string") imageSources[element.id] = resolved;
+      else if (resolved instanceof Blob) imageSources[element.id] = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Could not read slide image."));
+        reader.onerror = () => reject(reader.error ?? new Error("Could not read slide image."));
+        reader.readAsDataURL(resolved);
+      });
+    }));
+    const dataUrl = await captureDeckSlide(deck, slideIndex, imageSources);
+    const filename = `${slideId}.png`;
+    slideScreenshots.set(context.toolCallId, { data: dataUrl.slice(dataUrl.indexOf(",") + 1), filename });
+    return { ok: true, path, slideId, filename, width: 1280, height: Math.round(1280 * deck.size.height / deck.size.width) };
+  },
+  toModelOutput: ({ toolCallId, output }: { toolCallId: string; output: unknown }) => {
+    const screenshot = slideScreenshots.get(toolCallId);
+    slideScreenshots.delete(toolCallId);
+    if (!screenshot) return [{ type: "text" as const, text: stringifyToolResult(output) }];
+    return [
+      { type: "text" as const, text: stringifyToolResult(output) },
+      { type: "file" as const, data: screenshot.data, mediaType: "image/png", filename: screenshot.filename },
+    ];
+  },
+};
+
 function ChatTools({ provider }: { provider: "byok" | "webgpu" }) {
   const webgpuVision = useEngineStore((s) => modelHasVision(s.modalities));
   useAssistantInstructions(
@@ -921,6 +983,7 @@ function ChatTools({ provider }: { provider: "byok" | "webgpu" }) {
   useAssistantTool(lintSlideDeckTool);
   useAssistantTool(showSlideDeckTool);
   useAssistantTool(exportSlideDeckTool);
+  useAssistantTool({ ...screenshotSlideTool, disabled: provider === "webgpu" && !webgpuVision });
   useAssistantTool(createPresentationOutlineTool);
   useAssistantTool(getPresentationOutlineTool);
   useAssistantTool(getPresentationOutlineSlideTool);
